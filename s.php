@@ -1,4 +1,3 @@
-
 <?php
 // Checkpoint-401
 
