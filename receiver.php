@@ -13,13 +13,18 @@ if (isset($_POST['action']) && $_POST['action'] === 'register_site') {
     
     $data = file_exists($file) ? json_decode(file_get_contents($file), true) : [];
     
-    // Jika domain belum ada, tambahkan. Jika sudah ada, jangan timpa password yang sudah disimpan manual
+    if (!is_array($data)) $data = [];
+
+    // Jika domain belum ada, tambahkan.
     if (!isset($data[$key])) {
         $data[$key] = [
             'domain'   => $domain,
             'api_user' => '',
-            'api_pass' => ''
+            'api_pass' => '',
+            'date_added' => date('Y-m-d H:i:s')
         ];
-        file_put_contents($file, json_encode($data));
+        // Tambahkan JSON_PRETTY_PRINT agar rapi
+        file_put_contents($file, json_encode($data, JSON_PRETTY_PRINT));
     }
 }
+?>
